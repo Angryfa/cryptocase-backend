@@ -1,12 +1,13 @@
 from django.contrib.auth import authenticate, get_user_model
-from django.db.models import Q
+from django.db.models import Q, Sum
+from decimal import Decimal
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenRefreshView
 
-from .models import Profile
+from .models import Profile, Withdrawal, WithdrawalStatus
 from .serializers import UserPublicSerializer, RegisterSerializer, ProfileSerializer, UserWithProfileSerializer  
 from django.utils import timezone
 from referrals.models import ReferralProfile
@@ -94,13 +95,29 @@ class RefreshView(TokenRefreshView):
 class ProfileView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
+    def _add_withdrawn_total(self, request, data: dict) -> dict:
+        # Находим статус "approved" и считаем сумму всех подтверждённых выводов пользователя
+        approved = WithdrawalStatus.objects.filter(code="approved").first()
+        total = Decimal("0.00")
+        if approved:
+            total = (
+                Withdrawal.objects
+                .filter(user=request.user, status=approved)
+                .aggregate(s=Sum("amount_usd"))["s"]
+                or Decimal("0.00")
+            )
+        data["withdrawn_total_usd"] = total
+        return data
+
     def get(self, request):
         prof, _ = Profile.objects.get_or_create(user=request.user)
-        return Response(ProfileSerializer(prof).data)
+        data = ProfileSerializer(prof).data
+        return Response(self._add_withdrawn_total(request, data))
 
     def patch(self, request):
         prof, _ = Profile.objects.get_or_create(user=request.user)
         s = ProfileSerializer(prof, data=request.data, partial=True)
         s.is_valid(raise_exception=True)
-        s.save()
-        return Response(s.data)
+        prof = s.save()
+        data = ProfileSerializer(prof).data
+        return Response(self._add_withdrawn_total(request, data))
