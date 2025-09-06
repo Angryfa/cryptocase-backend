@@ -1,6 +1,6 @@
 from django.contrib.auth.models import User
 from rest_framework import serializers
-from .models import Profile
+from .models import Profile, Deposit
 
 class UserPublicSerializer(serializers.ModelSerializer):
     class Meta:
@@ -30,3 +30,14 @@ class UserWithProfileSerializer(UserPublicSerializer):
 
     class Meta(UserPublicSerializer.Meta):
         fields = UserPublicSerializer.Meta.fields + ("profile",)
+
+
+class DepositCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Deposit
+        fields = ("amount_usd","method","details")
+
+    def validate_amount_usd(self, v):
+        if v is None or v <= 0:
+            raise serializers.ValidationError("Сумма должна быть > 0")
+        return v

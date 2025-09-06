@@ -7,8 +7,8 @@ from rest_framework import status, permissions
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenRefreshView
 
-from .models import Profile, Withdrawal, WithdrawalStatus
-from .serializers import UserPublicSerializer, RegisterSerializer, ProfileSerializer, UserWithProfileSerializer  
+from .models import Profile, Withdrawal, WithdrawalStatus, Deposit, DepositStatus
+from .serializers import UserPublicSerializer, RegisterSerializer, ProfileSerializer, UserWithProfileSerializer
 from django.utils import timezone
 from referrals.models import ReferralProfile
 
@@ -108,11 +108,36 @@ class ProfileView(APIView):
             )
         data["withdrawn_total_usd"] = total
         return data
+    #Подсчет депоизта и вывода
+    def _add_fin_totals(self, request, data: dict) -> dict:
+        dep_ok = DepositStatus.objects.filter(code="approved").first()
+        wdr_ok = WithdrawalStatus.objects.filter(code="approved").first()
+        deposit_total = Decimal("0.00")
+        withdrawn_total = Decimal("0.00")
+        if dep_ok:
+            deposit_total = (
+               Deposit.objects
+               .filter(user=request.user, status=dep_ok)
+               .aggregate(s=Sum("amount_usd"))["s"]
+               or Decimal("0.00")
+            )
+        if wdr_ok:
+            withdrawn_total = (
+               Withdrawal.objects
+               .filter(user=request.user, status=wdr_ok)
+               .aggregate(s=Sum("amount_usd"))["s"]
+               or Decimal("0.00")
+            )
+        data["deposit_total_usd"] = deposit_total
+        data["withdrawn_total_usd"] = withdrawn_total
+        return data
+        
+                
 
     def get(self, request):
         prof, _ = Profile.objects.get_or_create(user=request.user)
         data = ProfileSerializer(prof).data
-        return Response(self._add_withdrawn_total(request, data))
+        return Response(self._add_fin_totals(request, data))
 
     def patch(self, request):
         prof, _ = Profile.objects.get_or_create(user=request.user)
@@ -120,4 +145,4 @@ class ProfileView(APIView):
         s.is_valid(raise_exception=True)
         prof = s.save()
         data = ProfileSerializer(prof).data
-        return Response(self._add_withdrawn_total(request, data))
+        return Response(self._add_fin_totals(request, data))
