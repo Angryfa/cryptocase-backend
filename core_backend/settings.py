@@ -6,9 +6,20 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
+# Дополнительно подхватываем prod-конфиг, если указана среда
+ENV = os.getenv("DJANGO_ENV", "").lower()
+if ENV == "production":
+    load_dotenv(BASE_DIR / ".env.production", override=True)
+
 SECRET_KEY = os.getenv("SECRET_KEY", "dev")
 DEBUG = os.getenv("DEBUG", "0") == "1"
 ALLOWED_HOSTS = [x.strip() for x in os.getenv("ALLOWED_HOSTS","").split(",") if x.strip()]
+
+if not DEBUG and (not SECRET_KEY or SECRET_KEY == "dev"):
+    raise ValueError("SECRET_KEY должен быть задан в .env(.production) для production")
+
+if not DEBUG and not ALLOWED_HOSTS:
+    raise ValueError("ALLOWED_HOSTS должен быть задан для production")
 
 INSTALLED_APPS = [
     "django.contrib.admin", 
@@ -23,6 +34,8 @@ INSTALLED_APPS = [
     "api",
     "cases",
     "referrals",
+    "support",
+    "cashback",
 ]
 
 MIDDLEWARE = [
@@ -62,6 +75,9 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "static"
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
@@ -92,9 +108,10 @@ else:
     }
 
 
-# CORS
+# CORS / CSRF
 CORS_ALLOWED_ORIGINS = [x.strip() for x in os.getenv("CORS_ALLOWED_ORIGINS","").split(",") if x.strip()]
 CORS_ALLOW_CREDENTIALS = True
+CSRF_TRUSTED_ORIGINS = [x.strip() for x in os.getenv("CSRF_TRUSTED_ORIGINS","").split(",") if x.strip()]
 
 # DRF + JWT
 REST_FRAMEWORK = {
@@ -112,4 +129,4 @@ SIMPLE_JWT = {
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
-FRONTEND_BASE_URL = "http://localhost:3000"
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000")

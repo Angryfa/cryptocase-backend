@@ -18,3 +18,22 @@ class ReferralProfile(models.Model):
 
     def __str__(self):
         return f"ReferralProfile<{self.user}>"
+
+
+class ReferralLevelConfig(models.Model):
+    """Настройки процентов по уровням рефералок.
+
+    Примеры записей:
+      level=1, percent=10.00
+      level=2, percent=5.00
+    """
+    level = models.PositiveIntegerField(unique=True, db_index=True)
+    percent = models.DecimalField(max_digits=5, decimal_places=2)
+
+    class Meta:
+        verbose_name = "Процент рефералов (уровень)"
+        verbose_name_plural = "Проценты рефералов (уровни)"
+        ordering = ("level",)
+
+    def __str__(self):
+        return f"L{self.level}: {self.percent}%"
