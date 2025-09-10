@@ -39,6 +39,21 @@ class CaseDetailSerializer(CaseSerializer):
 
 class SpinSerializer(serializers.ModelSerializer):
     prize = CasePrizeSerializer(read_only=True)
+    prize_title = serializers.CharField(source="prize.title", read_only=True)
+    amount_usd  = serializers.DecimalField(source="prize.amount_usd", max_digits=14, decimal_places=2, read_only=True)
+
     class Meta:
         model = Spin
-        fields = ("id", "case", "prize", "created_at")
+        fields = (
+            "id", "created_at",
+            "case", "prize", "prize_title", "amount_usd",
+            # Provably Fair:
+            "server_seed_hash",
+            "server_seed",        # если не хочешь светить сразу — просто убери эту строку
+            "client_seed",
+            "nonce",
+            "roll_digest",
+            "rng_value",
+            "weights_snapshot",
+        )
+        read_only_fields = fields

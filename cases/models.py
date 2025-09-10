@@ -1,5 +1,5 @@
 from django.db import models
-from django.db.models import Q, F
+from django.db.models import Q, F, JSONField 
 from django.utils import timezone
 from django.conf import settings
 
@@ -92,6 +92,18 @@ class Spin(models.Model):
     prize = models.ForeignKey(CasePrize, on_delete=models.PROTECT)
     user  = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    # NEW: PF-коммит/раскрытие
+    server_seed_hash = models.CharField(max_length=64, db_index=True, null=True, blank=True)
+    server_seed      = models.TextField(null=True, blank=True)  # можно шифровать на уровне БД/поля
+    client_seed      = models.CharField(max_length=64, null=True, blank=True)
+    nonce            = models.PositiveIntegerField(default=0, null=True, blank=True)
+
+    roll_digest = models.CharField(max_length=64, null=True, blank=True)  # hex HMAC-SHA256(server_seed, f"{client_seed}:{nonce}")
+    rng_value   = models.DecimalField(max_digits=20, decimal_places=18, null=True, blank=True)  # нормированное [0,1)
+
+    # Снимок весов (и, по желанию, курсов призов) на момент спина, чтобы верификация всегда совпадала
+    weights_snapshot = JSONField(null=True, blank=True)  # [{"prize_id":..., "weight":..., "amount_usd":"..."}]
 
     class Meta:
         verbose_name = "Крутка"

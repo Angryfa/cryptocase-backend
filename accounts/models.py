@@ -2,6 +2,11 @@ from decimal import Decimal
 from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
+from django.conf import settings
+import os, base64
+
+def _gen_client_seed():
+    return base64.b16encode(os.urandom(16)).decode().lower()  # 32 hex
 
 class Profile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
@@ -13,11 +18,20 @@ class Profile(models.Model):
     won_total_usd      = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
     lost_total_usd     = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
 
+    # NEW: Provably Fair
+    client_seed = models.CharField(max_length=64, default=_gen_client_seed, db_index=True,null=True, blank=True)
+    pf_nonce = models.PositiveIntegerField(default=0, help_text="Счётчик прокруток для текущего client_seed")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f"Profile<{self.user.username}>"
+    def next_nonce(self):
+        # вызывать внутри select_for_update()
+        self.pf_nonce = (self.pf_nonce or 0) + 1
+        self.save(update_fields=["pf_nonce", "updated_at"])
+        return self.pf_nonce
 
 class WithdrawalStatus(models.Model):
     """Справочник статусов заявок на вывод."""

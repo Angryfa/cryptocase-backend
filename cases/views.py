@@ -13,6 +13,10 @@ from .serializers import (
     CaseTypeSerializer, CaseSerializer, CaseDetailSerializer,
     CasePrizeSerializer, SpinSerializer
 )
+from .pf_utils import (
+    generate_server_seed, sha256_hex, hmac_sha256_hex, digest_to_uniform, pick_by_weights
+)
+from rest_framework import mixins
 
 class CaseTypeViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = CaseType.objects.filter(is_active=True)
@@ -49,7 +53,6 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=["post"], url_path="spin", permission_classes=[permissions.IsAuthenticated])
     def spin(self, request, pk=None):
         with transaction.atomic():
-            # блокируем профиль и кейс, чтобы избежать гонок
             prof, _ = Profile.objects.select_for_update().get_or_create(user=request.user)
             case = Case.objects.select_for_update().get(pk=pk)
 
@@ -68,34 +71,121 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             if not prizes:
                 return Response({"detail": "У кейса нет призов"}, status=status.HTTP_400_BAD_REQUEST)
 
-            # списываем цену
+            # ====== PF: подготовка ======
+            client_seed = prof.client_seed
+            nonce = prof.next_nonce()  # атомарно +1 под блокировкой профиля
+
+            server_seed = generate_server_seed()
+            server_hash = sha256_hex(server_seed)
+
+            msg = f"{client_seed}:{nonce}"
+            digest_hex = hmac_sha256_hex(server_seed, msg)
+            r = digest_to_uniform(digest_hex)
+
+            # Снимок весов на момент спина
+            weights_snapshot = [
+                {"prize_id": p.id, "weight": int(max(1, p.weight or 1)), "amount_usd": str(p.amount_usd)}
+                for p in prizes
+            ]
+
+            # Детерминированный выбор приза
+            prize = pick_by_weights(r, [{"obj": p, "weight": p.weight} for p in prizes])
+
+            # ====== Денежная логика (как у тебя) ======
             prof.balance_usd -= price
-
-            # выбираем приз по весам
-            weights = [max(1, p.weight or 1) for p in prizes]
-            prize = random.choices(prizes, weights=weights, k=1)[0]
-
-            # начисляем приз
             prof.balance_usd += Decimal(prize.amount_usd)
 
-            # учёт выигрыша/проигрыша (net = prize - price)
             net = Decimal(prize.amount_usd) - price
             if net >= 0:
                 prof.won_total_usd  += net
             else:
                 prof.lost_total_usd += -net
 
-            # уменьшаем лимит для лимитных
             if case.is_limited_mode():
                 Case.objects.filter(pk=case.pk).update(spins_used=F("spins_used") + 1)
                 case.refresh_from_db(fields=["spins_used"])
 
-            prof.save(update_fields=["balance_usd", "won_total_usd", "lost_total_usd", "updated_at"])
+            prof.save(update_fields=["balance_usd", "won_total_usd", "lost_total_usd", "pf_nonce", "updated_at"])
 
-            spin = Spin.objects.create(case=case, prize=prize, user=request.user)
+            # ====== Сохраняем PF-артефакты в Spin ======
+            spin = Spin.objects.create(
+                case=case,
+                prize=prize,
+                user=request.user,
+                server_seed_hash=server_hash,
+                server_seed=server_seed,         # ты можешь НЕ отдавать его сразу во фронт — решай бизнес-правилом
+                client_seed=client_seed,
+                nonce=nonce,
+                roll_digest=digest_hex,
+                rng_value=r,                     # Decimal хранится точно
+                weights_snapshot=weights_snapshot,
+            )
+
             data = {
                 "case": CaseSerializer(case, context=self.get_serializer_context()).data,
                 "spin": SpinSerializer(spin, context=self.get_serializer_context()).data,
                 "profile": ProfileSerializer(prof).data,
+                # Дополнительно — быстрое поле для фронта:
+                "provably_fair": {
+                    "serverSeedHash": server_hash,
+                    "serverSeed": server_seed,   # если хочешь раскрывать сразу — оставить; иначе — убери
+                    "clientSeed": client_seed,
+                    "nonce": nonce,
+                    "rollDigest": digest_hex,
+                    "rngValue": str(r),
+                },
             }
             return Response(data, status=status.HTTP_201_CREATED)
+        
+class SpinViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+    queryset = Spin.objects.select_related("case", "prize")
+    serializer_class = SpinSerializer
+    permission_classes = [permissions.IsAuthenticated]  # историю и проверку — только владельцу? иначе AllowAny
+
+    @action(detail=True, methods=["get"], url_path="verify", permission_classes=[permissions.AllowAny])
+    def verify(self, request, pk=None):
+        spin = self.get_object()
+
+        # 1) проверка коммита
+        calculated_hash = sha256_hex(spin.server_seed)
+        ok_hash = (calculated_hash == spin.server_seed_hash)
+
+        # 2) пересчёт HMAC и rng
+        msg = f"{spin.client_seed}:{spin.nonce}"
+        digest_hex = hmac_sha256_hex(spin.server_seed, msg)
+        rng = digest_to_uniform(digest_hex)
+
+        # 3) выбор приза по snapshot весов
+        # (берём призы по id из case.prizes, но веса — из snapshot)
+        prizes_by_id = {p.id: p for p in spin.case.prizes.all()}
+        items = []
+        for item in (spin.weights_snapshot or []):
+            p = prizes_by_id.get(item["prize_id"])
+            if p:
+                items.append({"obj": p, "weight": int(item.get("weight", 1))})
+        if not items:
+            # fallback — текущее состояние (не идеально, но лучше чем ничего)
+            items = [{"obj": p, "weight": p.weight} for p in spin.case.prizes.all()]
+
+        recomputed_prize = pick_by_weights(rng, items)
+
+        return Response({
+            "ok": bool(ok_hash and digest_hex == spin.roll_digest and recomputed_prize.id == spin.prize_id),
+            "checks": {
+                "serverSeedHashMatches": ok_hash,
+                "rollDigestMatches": (digest_hex == spin.roll_digest),
+                "prizeMatches": (recomputed_prize.id == spin.prize_id),
+            },
+            "recomputed": {
+                "serverSeedHash": calculated_hash,
+                "rollDigest": digest_hex,
+                "rngValue": str(rng),
+                "prize_id": recomputed_prize.id,
+            },
+            "original": {
+                "serverSeedHash": spin.server_seed_hash,
+                "rollDigest": spin.roll_digest,
+                "rngValue": str(spin.rng_value),
+                "prize_id": spin.prize_id,
+            }
+        })
