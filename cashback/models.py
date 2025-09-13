@@ -75,3 +75,38 @@ class CashbackAccrual(models.Model):
     @staticmethod
     def quant2(v: Decimal) -> Decimal:
         return (v or Decimal("0")).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+    
+class CashbackDebit(models.Model):
+    """
+    Списание кэшбэка (перевод на баланс пользователя).
+    Сохраняем только факт списания в USD-эквиваленте.
+    При желании можно расширить валютой зачисления (см. поля ниже, закомментированы).
+    """
+    STATUS_PENDING   = "pending"
+    STATUS_COMPLETED = "completed"
+    STATUS_CANCELLED = "cancelled"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Ожидает"),
+        (STATUS_COMPLETED, "Завершено"),
+        (STATUS_CANCELLED, "Отменено"),
+    ]
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="cashback_debits")
+    amount_usd = models.DecimalField(max_digits=16, decimal_places=2)
+
+    # Опционально — если решим зачислять в конкретную валюту:
+    # payout_currency = models.CharField(max_length=20, blank=True)   # "USDT-TRC20", "BTC", ...
+    # payout_amount   = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    # payout_rate_usd = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)  # сколько USD за 1 ед. валюты на момент списания
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_COMPLETED, db_index=True)
+    note = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        verbose_name = "Списание кэшбэка"
+        verbose_name_plural = "Списания кэшбэка"
+        ordering = ("-created_at", "id")
+
+    def __str__(self):
+        return f"CashbackDebit<{self.id}> {self.user} -${self.amount_usd}"

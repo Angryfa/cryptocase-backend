@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import CashbackSettings, CashbackAccrual
+from .models import CashbackSettings, CashbackAccrual, CashbackDebit
 
 @admin.register(CashbackSettings)
 class CashbackSettingsAdmin(admin.ModelAdmin):
@@ -13,3 +13,11 @@ class CashbackAccrualAdmin(admin.ModelAdmin):
     search_fields = ("user__username", "user__email")
     autocomplete_fields = ("user",)
     readonly_fields = ("computed_at",)
+
+@admin.register(CashbackDebit)
+class CashbackDebitAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "amount_usd", "status", "created_at")
+    list_filter = ("status",)
+    search_fields = ("user__username", "user__email")
+    autocomplete_fields = ("user",)
+    readonly_fields = ("created_at",)

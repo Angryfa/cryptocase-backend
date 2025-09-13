@@ -1,15 +1,21 @@
 from django.contrib.auth import get_user_model
-from rest_framework import viewsets, permissions, mixins
+from rest_framework import viewsets, permissions, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
-from rest_framework import status
+
 
 from accounts.serializers import UserWithProfileSerializer
 from cases.models import Case, CaseType, Spin
 from referrals.models import ReferralLevelConfig, ReferralProfile
 from cashback.models import CashbackSettings
-from .serializers_admin import AdminCaseWriteSerializer, AdminCaseTypeSerializer, AdminReferralLevelSerializer, AdminCashbackSettingsSerializer
+from .serializers_admin import (
+    AdminCaseWriteSerializer,
+    AdminCaseTypeSerializer,
+    AdminReferralLevelSerializer,
+    AdminCashbackSettingsSerializer,
+)
 
+from cashback.services import run_cashback_snapshot
 
 class IsAdmin(permissions.IsAdminUser):
     pass
@@ -100,3 +106,20 @@ class AdminCashbackSettingsViewSet(viewsets.ModelViewSet):
     queryset = CashbackSettings.objects.all()
     serializer_class = AdminCashbackSettingsSerializer
     permission_classes = [IsAdmin]
+
+    @action(detail=False, methods=["post"], url_path="run")
+    def run_cashback(self, request):
+        """
+        POST /api/admin/cashback-settings/run/
+        body: { "at": "...", "percent": 10.0, "upsert": true, "dry_run": false }
+        """
+        data = request.data or {}
+        res = run_cashback_snapshot(
+            as_of=data.get("at"),
+            percent=data.get("percent"),
+            upsert=bool(data.get("upsert", True)),
+            dry_run=bool(data.get("dry_run", False)),
+        )
+        if not res.get("ok"):
+            return Response({"detail": res.get("error")}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(res, status=status.HTTP_200_OK)
