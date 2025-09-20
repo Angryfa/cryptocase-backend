@@ -42,11 +42,14 @@ class SpinSerializer(serializers.ModelSerializer):
     prize_title = serializers.CharField(source="prize.title", read_only=True)
     amount_usd  = serializers.DecimalField(source="prize.amount_usd", max_digits=14, decimal_places=2, read_only=True)
 
+    case_name = serializers.CharField(source="case.name", read_only=True)
+    case_id = serializers.IntegerField(source="case.id", read_only=True)
+
     class Meta:
         model = Spin
         fields = (
             "id", "created_at",
-            "case", "prize", "prize_title", "amount_usd",
+            "case","case_id","case_name", "prize", "prize_title", "amount_usd",
             # Provably Fair:
             "server_seed_hash",
             "server_seed",        # если не хочешь светить сразу — просто убери эту строку
@@ -56,4 +59,15 @@ class SpinSerializer(serializers.ModelSerializer):
             "rng_value",
             "weights_snapshot",
         )
+        read_only_fields = fields
+
+class SpinListSerializer(serializers.ModelSerializer):
+    case_id   = serializers.IntegerField(source="case.id", read_only=True)
+    case_name = serializers.CharField(source="case.name", read_only=True)
+    prize_title = serializers.CharField(source="prize.title", read_only=True)
+    amount_usd  = serializers.DecimalField(source="prize.amount_usd", max_digits=14, decimal_places=2, read_only=True)
+
+    class Meta:
+        model = Spin
+        fields = ("id", "created_at", "case_id", "case_name", "prize_title", "amount_usd")
         read_only_fields = fields

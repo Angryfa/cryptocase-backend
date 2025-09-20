@@ -11,12 +11,21 @@ from .models import CaseType, Case, CasePrize, Spin
 from accounts.serializers import ProfileSerializer
 from .serializers import (
     CaseTypeSerializer, CaseSerializer, CaseDetailSerializer,
-    CasePrizeSerializer, SpinSerializer
+    CasePrizeSerializer, SpinSerializer, SpinListSerializer
 )
 from .pf_utils import (
     generate_server_seed, sha256_hex, hmac_sha256_hex, digest_to_uniform, pick_by_weights
 )
 from rest_framework import mixins
+
+from rest_framework.pagination import PageNumberPagination
+
+class SmallPages(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
 
 class CaseTypeViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = CaseType.objects.filter(is_active=True)
@@ -137,10 +146,43 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             }
             return Response(data, status=status.HTTP_201_CREATED)
         
-class SpinViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+class SpinViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin , viewsets.GenericViewSet):
     queryset = Spin.objects.select_related("case", "prize")
     serializer_class = SpinSerializer
     permission_classes = [permissions.IsAuthenticated]  # историю и проверку — только владельцу? иначе AllowAny
+    
+    pagination_class = SmallPages
+
+    def get_queryset(self):
+        qs = Spin.objects.select_related("case", "prize")
+        # Для публичной проверки PF не ограничиваем пользователя
+        if getattr(self, "action", None) == "verify":
+            return qs
+        # Админ видит все (с опц. фильтрами), обычный пользователь — только свои
+        user = self.request.user
+        if user and user.is_staff:
+            user_id = self.request.query_params.get("user_id")
+            case_id = self.request.query_params.get("case_id")
+            if user_id:
+                qs = qs.filter(user_id=user_id)
+            if case_id:
+                qs = qs.filter(case_id=case_id)
+            return qs.order_by("-created_at")
+        return qs.filter(user=user).order_by("-created_at")
+
+    def get_serializer_class(self):
+        # Для списков — лёгкий сериалайзер; для retrieve — полный
+        if self.action in ("list", "my"):
+            return SpinListSerializer
+        return SpinSerializer
+
+    # /api/spins/my/ — явный эндпоинт “мои спины” (эквивалент list для обычного юзера)
+    @action(detail=False, methods=["get"], url_path="my", permission_classes=[permissions.IsAuthenticated])
+    def my(self, request):
+        qs = self.get_queryset().filter(user=request.user)
+        page = self.paginate_queryset(qs)
+        ser = self.get_serializer(page, many=True)
+        return self.get_paginated_response(ser.data)
 
     @action(detail=True, methods=["get"], url_path="verify", permission_classes=[permissions.AllowAny])
     def verify(self, request, pk=None):
