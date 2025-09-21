@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from decimal import Decimal
 import secrets
 
 User = settings.AUTH_USER_MODEL
@@ -37,3 +38,33 @@ class ReferralLevelConfig(models.Model):
 
     def __str__(self):
         return f"L{self.level}: {self.percent}%"
+
+class ReferralBonus(models.Model):
+    """История начислений рефереру за депозиты его рефералов."""
+    class Level(models.IntegerChoices):
+        L1 = 1, "Уровень 1"
+        L2 = 2, "Уровень 2"
+
+    referrer = models.ForeignKey(User, on_delete=models.CASCADE, related_name="referral_bonuses")
+    referral = models.ForeignKey(User, on_delete=models.CASCADE, related_name="made_referral_deposits")
+    deposit  = models.ForeignKey("accounts.Deposit", on_delete=models.PROTECT, related_name="referral_bonuses")
+
+    level      = models.PositiveSmallIntegerField(choices=Level.choices)          # 1 или 2
+    percent    = models.DecimalField(max_digits=5, decimal_places=2)              # сколько %, например 10.00
+    amount_usd = models.DecimalField(max_digits=14, decimal_places=2)             # начисленная сумма в USD
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Реферальный бонус"
+        verbose_name_plural = "Реферальные бонусы"
+        unique_together = (("deposit", "level"),)  # защита от повторного начисления
+        indexes = [
+            models.Index(fields=["referrer"]),
+            models.Index(fields=["deposit"]),
+            models.Index(fields=["created_at"]),
+        ]
+        ordering = ("-created_at",)
+
+    def __str__(self):
+        return f"Bonus L{self.level} {self.amount_usd} → {self.referrer}"

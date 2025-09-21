@@ -1,10 +1,11 @@
 from django.contrib import admin
 from django.utils import timezone
 from django.db import transaction
-from django.contrib import messages  # ← добавь это
+from django.contrib import messages
+from decimal import Decimal
 
 from .models import Profile, Withdrawal, WithdrawalStatus, Deposit, DepositStatus
-
+from referrals.services import award_referral_bonuses_for_deposit
 
 @admin.register(WithdrawalStatus)
 class WithdrawalStatusAdmin(admin.ModelAdmin):
@@ -149,24 +150,51 @@ class DepositAdmin(admin.ModelAdmin):
 
     actions = ["approve_deposits", "reject_deposits"]
 
-    @admin.action(description="Подтвердить депозит (зачислить на баланс)")
     def approve_deposits(self, request, queryset):
-        approved = 0
-        with transaction.atomic():
-            for d in queryset.select_for_update().select_related("user", "status"):
-                if d.processed_at or d.status.code != "pending":
-                    continue
-                prof, _ = Profile.objects.get_or_create(user=d.user)
-                prof.balance_usd += d.amount_usd
-                prof.save(update_fields=["balance_usd", "updated_at"])
+      approved = 0
+      bonus_rows = 0
+      bonus_sum = Decimal("0")
 
-                approved_status = DepositStatus.objects.filter(code="approved").first()
-                if approved_status:
-                    d.status = approved_status
-                d.processed_at = timezone.now()
-                d.save(update_fields=["status", "processed_at"])
-                approved += 1
-        self.message_user(request, f"Подтверждено депозитов: {approved}")
+      with transaction.atomic():
+         for d in queryset.select_for_update().select_related("user", "status"):
+               # уже обработан или не pending — пропускаем
+               if d.processed_at or d.status.code != "pending":
+                  continue
+
+               # 1) пополняем баланс пользователя на сумму депозита
+               prof, _ = Profile.objects.get_or_create(user=d.user)
+               prof.balance_usd += (d.amount_usd or Decimal("0"))
+               prof.save(update_fields=["balance_usd", "updated_at"])
+
+               # 2) переводим депозит в approved
+               approved_status = DepositStatus.objects.filter(code="approved").first()
+               if approved_status:
+                  d.status = approved_status
+               d.processed_at = timezone.now()
+               d.save(update_fields=["status", "processed_at"])
+               approved += 1
+
+               # 3) начисляем реф. бонусы L1/L2 + автозачисление на баланс рефереров
+               try:
+                  bonuses = award_referral_bonuses_for_deposit(d)  # идемпотентно (unique_together)
+               except Exception as e:
+                  # не роняем весь батч, просто предупреждаем
+                  self.message_user(
+                     request,
+                     f"Ошибка начисления реф. бонусов для депозита #{d.id}: {e}",
+                     level=messages.WARNING,
+                  )
+                  bonuses = []
+
+               bonus_rows += len(bonuses)
+               for b in bonuses:
+                  bonus_sum += (b.amount_usd or Decimal("0"))
+
+      self.message_user(
+         request,
+         f"Подтверждено депозитов: {approved}. "
+         f"Начислено реф. бонусов: {bonus_rows} на сумму ${bonus_sum:.2f}."
+      )
 
     @admin.action(description="Отклонить депозит")
     def reject_deposits(self, request, queryset):
