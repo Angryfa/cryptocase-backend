@@ -16,6 +16,11 @@ class CaseSerializer(serializers.ModelSerializer):
     type_id = serializers.PrimaryKeyRelatedField(
         source="type", queryset=CaseType.objects.all(), write_only=True, required=False
     )
+
+    # НОВОЕ: аватар (загрузка файла) и его URL (для чтения)
+    avatar = serializers.ImageField(required=False, allow_null=True)
+    avatar_url = serializers.SerializerMethodField(read_only=True)
+
     spins_remaining = serializers.IntegerField(read_only=True)
     is_available_now = serializers.SerializerMethodField()
 
@@ -27,10 +32,22 @@ class CaseSerializer(serializers.ModelSerializer):
             "available_from", "available_to",
             "spins_total", "spins_used", "spins_remaining",
             "is_available_now",
+            "avatar",        # <- принимает файл при POST/PUT/PATCH (multipart/form-data)
+            "avatar_url",    # <- отдаёт абсолютный URL
         )
 
     def get_is_available_now(self, obj):
         return obj.is_available_now()
+
+    def get_avatar_url(self, obj):
+        if not getattr(obj, "avatar", None):
+            return None
+        try:
+            url = obj.avatar.url
+        except ValueError:
+            return None
+        request = self.context.get("request")
+        return request.build_absolute_uri(url) if request else url
 
 class CaseDetailSerializer(CaseSerializer):
     prizes = CasePrizeSerializer(many=True, read_only=True)

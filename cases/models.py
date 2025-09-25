@@ -2,7 +2,16 @@ from django.db import models
 from django.db.models import Q, F, JSONField 
 from django.utils import timezone
 from django.conf import settings
+import os
+import uuid
 
+def upload_to_case(instance, filename: str) -> str:
+    # безопасное имя файла: только базовое имя и новый uuid
+    base = os.path.basename(filename or "")
+    _name, ext = os.path.splitext(base)
+    ext = (ext or "").lower()
+    new_name = f"{uuid.uuid4().hex}{ext}"
+    return f"cases/{instance.id or 'new'}/{new_name}"
 
 class CaseType(models.Model):
     type = models.SlugField(max_length=50, unique=True, db_index=True)  # 'standard', 'limited', ...
@@ -47,6 +56,14 @@ class Case(models.Model):
     # окно доступности (используется, если type.is_timed=True)
     available_from = models.DateTimeField(null=True, blank=True, db_index=True)
     available_to   = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    # НОВОЕ: картинка (аватар кейса)
+    avatar = models.FileField(
+        upload_to=upload_to_case,
+        null=True,
+        blank=True,
+        verbose_name="Аватар кейса"
+    )
 
     objects = CaseQuerySet.as_manager()
 

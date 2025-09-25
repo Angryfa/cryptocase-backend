@@ -2,7 +2,7 @@ from rest_framework import serializers
 from cases.models import Case, CasePrize, CaseType
 from referrals.models import ReferralLevelConfig
 from cashback.models import CashbackSettings
-
+import json
 
 class AdminCasePrizeInSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=255)
@@ -11,8 +11,14 @@ class AdminCasePrizeInSerializer(serializers.Serializer):
 
 
 class AdminCaseWriteSerializer(serializers.ModelSerializer):
+    # тип кейса для записи
     type_id = serializers.PrimaryKeyRelatedField(source="type", queryset=CaseType.objects.all())
-    prizes = AdminCasePrizeInSerializer(many=True, required=False)
+
+    # НОВОЕ: файл-аватар (принимаем через multipart/form-data)
+    avatar = serializers.ImageField(required=False, allow_null=True)
+
+    # НОВОЕ: призы (поддержка и обычного списка, и JSON-строки в multipart)
+    prizes = AdminCasePrizeInSerializer(many=True, required=False, write_only=True)
 
     class Meta:
         model = Case
@@ -26,27 +32,49 @@ class AdminCaseWriteSerializer(serializers.ModelSerializer):
             "available_to",
             "spins_total",
             "spins_used",
-            "prizes",
+            "avatar",     # <— добавлено
+            "prizes",     # <— write-only вход
         )
         read_only_fields = ("spins_used",)
+
+    def to_internal_value(self, data):
+        """
+        Делает сериализатор устойчивым к варианту, когда `prizes`
+        пришло строкой (JSON) внутри multipart/form-data.
+        """
+        mutable = data.copy()
+        raw = mutable.get("prizes")
+        if isinstance(raw, str):
+            try:
+                mutable["prizes"] = json.loads(raw) if raw.strip() else []
+            except json.JSONDecodeError:
+                raise serializers.ValidationError({"prizes": "Некорректный JSON"})
+        return super().to_internal_value(mutable)
 
     def create(self, validated_data):
         prizes_data = validated_data.pop("prizes", [])
         case = Case.objects.create(**validated_data)
-        for p in prizes_data:
-            CasePrize.objects.create(case=case, **p)
+        if prizes_data:
+            CasePrize.objects.bulk_create([
+                CasePrize(case=case, **p) for p in prizes_data
+            ])
         return case
 
     def update(self, instance: Case, validated_data):
         prizes_data = validated_data.pop("prizes", None)
+
+        # обновляем поля кейса, включая avatar (если пришёл)
         for field, value in validated_data.items():
             setattr(instance, field, value)
         instance.save()
+
+        # политика упрощённая: полная замена призов при передаче prizes
         if prizes_data is not None:
-            # Полная замена списка призов для простоты
             instance.prizes.all().delete()
-            for p in prizes_data:
-                CasePrize.objects.create(case=instance, **p)
+            if prizes_data:
+                CasePrize.objects.bulk_create([
+                    CasePrize(case=instance, **p) for p in prizes_data
+                ])
         return instance
 
 

@@ -15,6 +15,8 @@ from .serializers_admin import (
     AdminCashbackSettingsSerializer,
 )
 
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+
 from cashback.services import run_cashback_snapshot
 
 class IsAdmin(permissions.IsAdminUser):
@@ -91,6 +93,7 @@ class AdminCaseViewSet(viewsets.ModelViewSet):
     queryset = Case.objects.all().select_related("type").prefetch_related("prizes")
     serializer_class = AdminCaseWriteSerializer
     permission_classes = [IsAdmin]
+    parser_classes = (MultiPartParser, FormParser, JSONParser)  # <— ВАЖНО
 
 class AdminCaseTypeViewSet(viewsets.ModelViewSet):
     queryset = CaseType.objects.all()

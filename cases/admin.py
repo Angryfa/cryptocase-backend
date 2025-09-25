@@ -1,5 +1,6 @@
 from django.contrib import admin
 from .models import CaseType, Case, CasePrize, Spin
+from django.utils.html import format_html
 
 @admin.register(CaseType)
 class CaseTypeAdmin(admin.ModelAdmin):
@@ -13,10 +14,27 @@ class CasePrizeInline(admin.TabularInline):
 
 @admin.register(Case)
 class CaseAdmin(admin.ModelAdmin):
-    list_display = ("id", "name", "type", "price_usd", "is_active", "spins_total", "spins_used", "spins_remaining")
+    list_display = (
+        "id", 
+        "name", 
+        "type", 
+        "price_usd", 
+        "is_active", 
+        "spins_total", 
+        "spins_used", 
+        "spins_remaining",
+        "avatar_preview",   # новое поле для списка
+    )
     list_filter = ("is_active", "type")
     search_fields = ("name",)
     inlines = [CasePrizeInline]
+    readonly_fields = ("avatar_preview",)  # превью только для отображения
+
+    def avatar_preview(self, obj):
+        if obj.avatar:
+            return format_html('<img src="{}" width="50" height="50" style="object-fit:cover;border-radius:5px;" />', obj.avatar.url)
+        return "—"
+    avatar_preview.short_description = "Аватар"
 
 @admin.register(CasePrize)
 class CasePrizeAdmin(admin.ModelAdmin):
