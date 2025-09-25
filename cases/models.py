@@ -58,11 +58,11 @@ class Case(models.Model):
     available_to   = models.DateTimeField(null=True, blank=True, db_index=True)
 
     # НОВОЕ: картинка (аватар кейса)
-    avatar = models.FileField(
+    avatar = models.ImageField(  # <-- было FileField
         upload_to=upload_to_case,
         null=True,
         blank=True,
-        verbose_name="Аватар кейса"
+        verbose_name="Аватар кейса",
     )
 
     objects = CaseQuerySet.as_manager()

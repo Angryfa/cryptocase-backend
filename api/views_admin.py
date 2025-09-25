@@ -6,6 +6,7 @@ from rest_framework.decorators import action
 
 from accounts.serializers import UserWithProfileSerializer
 from cases.models import Case, CaseType, Spin
+from cases.serializers import CaseDetailSerializer
 from referrals.models import ReferralLevelConfig, ReferralProfile
 from cashback.models import CashbackSettings
 from .serializers_admin import (
@@ -91,9 +92,35 @@ class AdminUserViewSet(viewsets.ReadOnlyModelViewSet):
 
 class AdminCaseViewSet(viewsets.ModelViewSet):
     queryset = Case.objects.all().select_related("type").prefetch_related("prizes")
-    serializer_class = AdminCaseWriteSerializer
     permission_classes = [IsAdmin]
-    parser_classes = (MultiPartParser, FormParser, JSONParser)  # <— ВАЖНО
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
+
+    def get_serializer_class(self):
+        # на запись — write; на чтение — read (с avatar_url)
+        if self.action in ("create", "update", "partial_update"):
+            return AdminCaseWriteSerializer
+        return CaseDetailSerializer
+
+    # Чтобы в ответе на create/update вернуть avatar_url и пр. — сериализуем заново рид-сериализатором:
+    def create(self, request, *args, **kwargs):
+        w = AdminCaseWriteSerializer(data=request.data, context={"request": request})
+        w.is_valid(raise_exception=True)
+        instance = w.save()
+        r = CaseDetailSerializer(instance, context={"request": request})
+        return Response(r.data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        w = AdminCaseWriteSerializer(instance, data=request.data, partial=partial, context={"request": request})
+        w.is_valid(raise_exception=True)
+        instance = w.save()
+        r = CaseDetailSerializer(instance, context={"request": request})
+        return Response(r.data, status=status.HTTP_200_OK)
+
+    def partial_update(self, request, *args, **kwargs):
+        kwargs["partial"] = True
+        return self.update(request, *args, **kwargs)
 
 class AdminCaseTypeViewSet(viewsets.ModelViewSet):
     queryset = CaseType.objects.all()
