@@ -123,6 +123,51 @@ class AdminDashboardView(APIView):
         losses_sum = losses_q.aggregate(s=Sum("diff"))["s"] or Decimal("0")
 
         profit_usd = deposits_sum + losses_sum - wins_sum
+        # ===== Доход по играм =====
+        # Case: используем существующие Spin записи
+        case_spins = spin_q  # уже отфильтровано по периоду
+        case_bets_sum = case_spins.aggregate(
+           total=Sum("case__price_usd")
+        )["total"] or Decimal("0")
+
+        case_wins_sum = case_spins.aggregate(
+           total=Sum("prize__amount_usd")
+        )["total"] or Decimal("0")
+
+        case_revenue = case_bets_sum - case_wins_sum
+        case_games_count = case_spins.count()
+
+        # Double и Defuse - заглушки (игры пока не реализованы)
+        double_revenue = Decimal("0")
+        double_bets_sum = Decimal("0")
+        double_wins_sum = Decimal("0")
+        double_games_count = 0
+        
+        defuse_revenue = Decimal("0")
+        defuse_bets_sum = Decimal("0")
+        defuse_wins_sum = Decimal("0")
+        defuse_games_count = 0
+
+        game_revenue = {
+            "case": {
+                "revenue_usd": float(case_revenue),
+                "bets_sum": float(case_bets_sum),
+                "wins_sum": float(case_wins_sum),
+                "games_count": case_games_count,
+            },
+            "double": {
+                "revenue_usd": float(double_revenue),
+                "bets_sum": float(double_bets_sum),
+                "wins_sum": float(double_wins_sum),
+                "games_count": double_games_count,
+            },
+            "defuse": {
+                "revenue_usd": float(defuse_revenue),
+                "bets_sum": float(defuse_bets_sum),
+                "wins_sum": float(defuse_wins_sum),
+                "games_count": defuse_games_count,
+            },
+        }
 
         # ===== 2) Прокрутки по типам кейсов =====
         spins_by_type = (
@@ -250,6 +295,7 @@ class AdminDashboardView(APIView):
                "7d": get_balance_history(7),
                "30d": get_balance_history(30),
                "365d": get_balance_history(365),
-            }
+            },
+            "game_revenue": game_revenue,
         }
         return Response(data, status=status.HTTP_200_OK)
