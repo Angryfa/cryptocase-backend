@@ -77,8 +77,32 @@ def _parse_period(request) -> Tuple[datetime, datetime]:
 
 class AdminDashboardView(APIView):
     permission_classes = [IsAdmin]
-
+    
     def get(self, request):
+        def get_balance_history(days):
+         """Возвращает историю общего баланса пользователей за указанное количество дней"""
+         
+         history = []
+         end_date = timezone.now().date()
+         start_date = end_date - timedelta(days=days-1)
+         
+         for i in range(days):
+            date = start_date + timedelta(days=i)
+            # Получаем срез баланса на конец каждого дня
+            # Это упрощенная версия - в реальности нужна история транзакций
+            total = Profile.objects.filter(
+                  user__is_staff=False,
+                  user__is_superuser=False,
+                  created_at__lte=date
+            ).aggregate(total=Sum("balance_usd"))["total"] or Decimal("0")
+            
+            history.append({
+                  "date": date.isoformat(),
+                  "balance": float(total)
+            })
+         
+         return history
+
         dt_from, dt_to = _parse_period(request)
 
        # ===== 1) Прибыль платформы =====
@@ -119,12 +143,25 @@ class AdminDashboardView(APIView):
 
         # ===== 3) Новые пользователи =====
         new_users_count = User.objects.filter(date_joined__gte=dt_from, date_joined__lte=dt_to).count()
+        # Детали новых пользователей
+        new_users_list = User.objects.filter(
+            date_joined__gte=dt_from, 
+            date_joined__lte=dt_to
+         ).select_related('profile', 'referral').values(
+            'id', 'username', 'email', 'date_joined',
+            'profile__balance_usd', 'profile__deposit_total_usd',
+            'referral__referred_by_id'  # если не null, значит реферал
+         ).order_by('-date_joined')
 
         # ===== 4) Новые пользователи от рефералов =====
         # В твоём коде ReferralProfile имеет referred_at — используем его
         new_ref_users_count = ReferralProfile.objects.filter(
             referred_at__gte=dt_from, referred_at__lte=dt_to
         ).count()
+        total_users_balance = Profile.objects.filter(
+            user__is_staff=False,
+            user__is_superuser=False
+         ).aggregate(total=Sum("balance_usd"))["total"] or Decimal("0")
 
         # ===== 5a) Топ пользователей по прокруткам =====
         top_by_spins = (
@@ -185,6 +222,7 @@ class AdminDashboardView(APIView):
                 "from": dt_from.isoformat(),
                 "to": dt_to.isoformat(),
             },
+            "new_users_list": list(new_users_list),
             "kpis": {
                 "profit_usd": float(profit_usd),
                 "deposits_sum_usd": float(deposits_sum),
@@ -201,11 +239,17 @@ class AdminDashboardView(APIView):
                     "sum_all_usd": float(withdrawals_sum_all),
                     "sum_completed_usd": float(withdrawals_sum_done),
                 },
+                "total_users_balance_usd": float(total_users_balance),
             },
             "spins_by_type": spins_by_type,
             "top_users": {
                 "by_spins": top_by_spins,
                 "by_user_profit": top_by_user_profit,
             },
+            "balance_history": {
+               "7d": get_balance_history(7),
+               "30d": get_balance_history(30),
+               "365d": get_balance_history(365),
+            }
         }
         return Response(data, status=status.HTTP_200_OK)
