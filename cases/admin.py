@@ -1,6 +1,20 @@
 from django.contrib import admin
-from .models import CaseType, Case, CasePrize, Spin
+from .models import Prize, CaseType, Case, CasePrize, Spin
 from django.utils.html import format_html
+
+@admin.register(Prize)
+class PrizeAdmin(admin.ModelAdmin):
+    list_display = ("id", "name", "image_preview", "is_active", "created_at")
+    list_filter = ("is_active", "created_at")
+    search_fields = ("name",)
+    readonly_fields = ("image_preview", "created_at", "updated_at")
+    list_per_page = 20
+
+    def image_preview(self, obj):
+        if obj.image:
+            return format_html('<img src="{}" width="50" height="50" style="object-fit:cover;border-radius:5px;" />', obj.image.url)
+        return "—"
+    image_preview.short_description = "Изображение"
 
 @admin.register(CaseType)
 class CaseTypeAdmin(admin.ModelAdmin):
@@ -11,6 +25,12 @@ class CaseTypeAdmin(admin.ModelAdmin):
 class CasePrizeInline(admin.TabularInline):
     model = CasePrize
     extra = 1
+    fields = ("prize", "amount_min_usd", "amount_max_usd", "weight")
+    autocomplete_fields = ["prize"]
+    
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        return qs.select_related("prize")
 
 @admin.register(Case)
 class CaseAdmin(admin.ModelAdmin):
@@ -38,11 +58,28 @@ class CaseAdmin(admin.ModelAdmin):
 
 @admin.register(CasePrize)
 class CasePrizeAdmin(admin.ModelAdmin):
-    list_display = ("id", "case", "title", "amount_usd", "weight")
-    list_filter = ("case",)
-    search_fields = ("title", "case__name")
+    list_display = ("id", "case", "prize", "amount_min_usd", "amount_max_usd", "weight")
+    list_filter = ("case", "prize")
+    search_fields = ("prize__name", "case__name")
 
 @admin.register(Spin)
 class SpinAdmin(admin.ModelAdmin):
-    list_display = ("id", "case", "prize", "created_at")
+    list_display = ("id", "case", "prize_name", "amount_display", "created_at")
     list_filter = ("case", "created_at")
+    search_fields = ("case__name", "case_prize__prize__name")
+    
+    def prize_name(self, obj):
+        if obj.case_prize and obj.case_prize.prize:
+            return obj.case_prize.prize.name
+        elif obj.prize:
+            return obj.prize.prize_name
+        return "Неизвестный приз"
+    prize_name.short_description = "Приз"
+    
+    def amount_display(self, obj):
+        if obj.actual_amount_usd:
+            return f"${obj.actual_amount_usd}"
+        elif obj.prize and obj.prize.amount_usd:
+            return f"${obj.prize.amount_usd}"
+        return "—"
+    amount_display.short_description = "Сумма выигрыша"

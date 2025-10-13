@@ -1,13 +1,14 @@
 from rest_framework import serializers
-from cases.models import Case, CasePrize, CaseType
+from cases.models import Prize, Case, CasePrize, CaseType
 from referrals.models import ReferralLevelConfig
 from cashback.models import CashbackSettings
 from accounts.models import Deposit, Withdrawal, WithdrawalBlock, DepositBlock, AccountBlock
 import json
 
 class AdminCasePrizeInSerializer(serializers.Serializer):
-    title = serializers.CharField(max_length=255)
-    amount_usd = serializers.DecimalField(max_digits=14, decimal_places=2)
+    prize_id = serializers.IntegerField()
+    amount_min_usd = serializers.DecimalField(max_digits=14, decimal_places=2)
+    amount_max_usd = serializers.DecimalField(max_digits=14, decimal_places=2)
     weight = serializers.IntegerField(min_value=1, default=1)
 
 
@@ -53,27 +54,45 @@ class AdminCaseWriteSerializer(serializers.ModelSerializer):
         for i, p in enumerate(value):
             if not isinstance(p, dict):
                 raise serializers.ValidationError(f"prizes[{i}] должен быть объектом")
-            title = p.get("title")
-            amount_usd = p.get("amount_usd")
+            
+            prize_id = p.get("prize_id")
+            amount_min_usd = p.get("amount_min_usd")
+            amount_max_usd = p.get("amount_max_usd")
             weight = p.get("weight", 1)
 
-            if not isinstance(title, str) or not title.strip():
-                raise serializers.ValidationError(f"prizes[{i}].title обязателен")
-            # допускаем число или строку с числом
+            if not isinstance(prize_id, int):
+                raise serializers.ValidationError(f"prizes[{i}].prize_id обязателен и должен быть числом")
+            
+            # Проверяем, что приз существует
             try:
-                amount_usd = float(amount_usd)
+                Prize.objects.get(id=prize_id, is_active=True)
+            except Prize.DoesNotExist:
+                raise serializers.ValidationError(f"prizes[{i}].prize_id: приз с ID {prize_id} не найден или неактивен")
+            
+            # Валидируем суммы
+            try:
+                amount_min_usd = float(amount_min_usd)
+                amount_max_usd = float(amount_max_usd)
             except (TypeError, ValueError):
-                raise serializers.ValidationError(f"prizes[{i}].amount_usd должно быть числом")
+                raise serializers.ValidationError(f"prizes[{i}].amount_min_usd и amount_max_usd должны быть числами")
+            
+            if amount_min_usd <= 0 or amount_max_usd <= 0:
+                raise serializers.ValidationError(f"prizes[{i}]: суммы должны быть больше 0")
+            
+            if amount_min_usd > amount_max_usd:
+                raise serializers.ValidationError(f"prizes[{i}]: amount_min_usd не может быть больше amount_max_usd")
+            
             try:
                 weight = int(weight)
             except (TypeError, ValueError):
-                raise serializers.ValidationError(f"prizes[{i}].weight должно быть целым")
+                raise serializers.ValidationError(f"prizes[{i}].weight должно быть целым числом")
             if weight < 1:
-                raise serializers.ValidationError(f"prizes[{i}].weight >= 1")
+                raise serializers.ValidationError(f"prizes[{i}].weight должно быть >= 1")
 
             cleaned.append({
-                "title": title.strip(),
-                "amount_usd": amount_usd,
+                "prize_id": prize_id,
+                "amount_min_usd": amount_min_usd,
+                "amount_max_usd": amount_max_usd,
                 "weight": weight,
             })
         return cleaned
@@ -89,7 +108,13 @@ class AdminCaseWriteSerializer(serializers.ModelSerializer):
             case.save(update_fields=["avatar"])
         if prizes_data:
             CasePrize.objects.bulk_create([
-                CasePrize(case=case, title=p["title"], amount_usd=p["amount_usd"], weight=p["weight"])
+                CasePrize(
+                    case=case, 
+                    prize_id=p["prize_id"],
+                    amount_min_usd=p["amount_min_usd"], 
+                    amount_max_usd=p["amount_max_usd"], 
+                    weight=p["weight"]
+                )
                 for p in prizes_data
             ])
         return case
@@ -113,7 +138,13 @@ class AdminCaseWriteSerializer(serializers.ModelSerializer):
             instance.prizes.all().delete()
             if prizes_data:
                 CasePrize.objects.bulk_create([
-                    CasePrize(case=instance, title=p["title"], amount_usd=p["amount_usd"], weight=p["weight"])
+                    CasePrize(
+                        case=instance, 
+                        prize_id=p["prize_id"],
+                        amount_min_usd=p["amount_min_usd"], 
+                        amount_max_usd=p["amount_max_usd"], 
+                        weight=p["weight"]
+                    )
                     for p in prizes_data
                 ])
         return instance

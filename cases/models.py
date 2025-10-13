@@ -13,6 +13,35 @@ def upload_to_case(instance, filename: str) -> str:
     new_name = f"{uuid.uuid4().hex}{ext}"
     return f"cases/{instance.id or 'new'}/{new_name}"
 
+def upload_to_prize(instance, filename: str) -> str:
+    # безопасное имя файла: только базовое имя и новый uuid
+    base = os.path.basename(filename or "")
+    _name, ext = os.path.splitext(base)
+    ext = (ext or "").lower()
+    new_name = f"{uuid.uuid4().hex}{ext}"
+    return f"prizes/{instance.id or 'new'}/{new_name}"
+
+class Prize(models.Model):
+    """Модель приза с названием и картинкой"""
+    name = models.CharField(max_length=255, verbose_name="Название приза")
+    image = models.ImageField(
+        upload_to=upload_to_prize,
+        null=True,
+        blank=True,
+        verbose_name="Изображение приза"
+    )
+    is_active = models.BooleanField(default=True, verbose_name="Активен")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Приз"
+        verbose_name_plural = "Призы"
+        ordering = ("name",)
+
+    def __str__(self):
+        return self.name
+
 class CaseType(models.Model):
     type = models.SlugField(max_length=50, unique=True, db_index=True)  # 'standard', 'limited', ...
     name = models.CharField(max_length=100)                             # «Обычный», «Лимитированный», ...
@@ -93,22 +122,60 @@ class Case(models.Model):
 
 class CasePrize(models.Model):
     case = models.ForeignKey(Case, related_name="prizes", on_delete=models.CASCADE)
-    title = models.CharField(max_length=255)
-    amount_usd = models.DecimalField(max_digits=14, decimal_places=2)
-    weight = models.PositiveIntegerField(default=1)
+    prize = models.ForeignKey(Prize, on_delete=models.CASCADE, verbose_name="Приз", null=True, blank=True)
+    
+    # Старые поля для обратной совместимости (будут удалены позже)
+    title = models.CharField(max_length=255, null=True, blank=True)
+    amount_usd = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    
+    # Новые поля для диапазона номинала
+    amount_min_usd = models.DecimalField(max_digits=14, decimal_places=2, default=0.01, verbose_name="Минимальная сумма (USD)")
+    amount_max_usd = models.DecimalField(max_digits=14, decimal_places=2, default=1.00, verbose_name="Максимальная сумма (USD)")
+    
+    # Вероятность выпадения (вес)
+    weight = models.PositiveIntegerField(default=1, verbose_name="Вес (вероятность)")
 
     class Meta:
         verbose_name = "Приз кейса"
         verbose_name_plural = "Призы кейса"
+        # Убираем unique_together чтобы один приз мог быть в кейсе несколько раз с разными номиналами
 
     def __str__(self):
-        return f"{self.title} (${self.amount_usd})"
+        if self.prize:
+            return f"{self.prize.name} (${self.amount_min_usd}-${self.amount_max_usd})"
+        else:
+            return f"{self.title} (${self.amount_usd})"
+    
+    def get_random_amount(self):
+        """Возвращает случайную сумму в диапазоне [amount_min_usd, amount_max_usd]"""
+        import random
+        from decimal import Decimal
+        
+        min_amount = float(self.amount_min_usd)
+        max_amount = float(self.amount_max_usd)
+        
+        # Генерируем случайное число в диапазоне
+        random_amount = random.uniform(min_amount, max_amount)
+        
+        # Округляем до 2 знаков после запятой
+        return Decimal(str(round(random_amount, 2)))
+    
+    @property
+    def prize_name(self):
+        """Для обратной совместимости"""
+        return self.prize.name if self.prize else self.title
 
 class Spin(models.Model):
     case = models.ForeignKey(Case, on_delete=models.CASCADE)
-    prize = models.ForeignKey(CasePrize, on_delete=models.PROTECT)
+    case_prize = models.ForeignKey(CasePrize, on_delete=models.PROTECT, verbose_name="Приз кейса", null=True, blank=True)
     user  = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    # Старое поле для обратной совместимости
+    prize = models.ForeignKey(CasePrize, on_delete=models.PROTECT, null=True, blank=True, related_name="old_spins")
+
+    # Фактическая сумма выигрыша (случайная в диапазоне)
+    actual_amount_usd = models.DecimalField(max_digits=14, decimal_places=2, default=0.01, verbose_name="Фактическая сумма выигрыша")
 
     # NEW: PF-коммит/раскрытие
     server_seed_hash = models.CharField(max_length=64, db_index=True, null=True, blank=True)
@@ -120,11 +187,20 @@ class Spin(models.Model):
     rng_value   = models.DecimalField(max_digits=20, decimal_places=18, null=True, blank=True)  # нормированное [0,1)
 
     # Снимок весов (и, по желанию, курсов призов) на момент спина, чтобы верификация всегда совпадала
-    weights_snapshot = JSONField(null=True, blank=True)  # [{"prize_id":..., "weight":..., "amount_usd":"..."}]
+    weights_snapshot = JSONField(null=True, blank=True)  # [{"case_prize_id":..., "weight":..., "amount_min_usd":"...", "amount_max_usd":"..."}]
 
     class Meta:
         verbose_name = "Крутка"
         verbose_name_plural = "Крутки"
 
     def __str__(self):
-        return f"Spin #{self.id} — {self.case.name}: ${self.prize.amount_usd}"
+        return f"Spin #{self.id} — {self.case.name}: ${self.actual_amount_usd}"
+    
+    @property
+    def prize_info(self):
+        """Для обратной совместимости"""
+        if self.case_prize:
+            return self.case_prize.prize
+        elif self.prize:
+            return self.prize
+        return None

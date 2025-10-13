@@ -80,7 +80,7 @@ class AdminUserViewSet(viewsets.ModelViewSet):
         # spins history (первые 20 записей для предварительного просмотра)
         spins_qs = (
             Spin.objects.filter(user=user)
-            .select_related("case", "prize")
+            .select_related("case", "prize", "case_prize", "case_prize__prize")
             .order_by("-created_at")[:20]
         )
         spins = [
@@ -88,7 +88,11 @@ class AdminUserViewSet(viewsets.ModelViewSet):
                 "id": sp.id,
                 "created_at": sp.created_at,
                 "case": {"id": sp.case_id, "name": sp.case.name},
-                "prize": {"id": sp.prize_id, "title": sp.prize.title, "amount_usd": sp.prize.amount_usd},
+                "prize": {
+                    "id": sp.case_prize_id or sp.prize_id, 
+                    "title": sp.case_prize.prize.name if sp.case_prize and sp.case_prize.prize else (sp.prize.title if sp.prize else "Неизвестный приз"), 
+                    "amount_usd": sp.actual_amount_usd or (sp.prize.amount_usd if sp.prize else 0)
+                },
             }
             for sp in spins_qs
         ]
@@ -205,7 +209,11 @@ class AdminUserViewSet(viewsets.ModelViewSet):
                 "id": sp.id,
                 "created_at": sp.created_at,
                 "case": {"id": sp.case_id, "name": sp.case.name},
-                "prize": {"id": sp.prize_id, "title": sp.prize.title, "amount_usd": sp.prize.amount_usd},
+                "prize": {
+                    "id": sp.case_prize_id or sp.prize_id, 
+                    "title": sp.case_prize.prize.name if sp.case_prize and sp.case_prize.prize else (sp.prize.title if sp.prize else "Неизвестный приз"), 
+                    "amount_usd": sp.actual_amount_usd or (sp.prize.amount_usd if sp.prize else 0)
+                },
             }
             for sp in spins_page
         ]

@@ -1,5 +1,21 @@
 from rest_framework import serializers
-from .models import CaseType, Case, CasePrize, Spin
+from .models import Prize, CaseType, Case, CasePrize, Spin
+
+class PrizeSerializer(serializers.ModelSerializer):
+    image_url = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Prize
+        fields = ("id", "name", "image", "image_url", "is_active", "created_at", "updated_at")
+        read_only_fields = ("created_at", "updated_at")
+    
+    def get_image_url(self, obj):
+        if obj.image:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.image.url)
+            return obj.image.url
+        return None
 
 class CaseTypeSerializer(serializers.ModelSerializer):
     class Meta:
@@ -7,9 +23,28 @@ class CaseTypeSerializer(serializers.ModelSerializer):
         fields = ("id", "type", "name", "is_limited", "is_timed")
 
 class CasePrizeSerializer(serializers.ModelSerializer):
+    prize = PrizeSerializer(read_only=True)
+    prize_id = serializers.PrimaryKeyRelatedField(
+        source="prize", queryset=Prize.objects.all(), write_only=True, required=False
+    )
+    
+    # Для обратной совместимости
+    title = serializers.SerializerMethodField()
+    amount_usd = serializers.SerializerMethodField()
+    
     class Meta:
         model = CasePrize
-        fields = ("id", "title", "amount_usd", "weight")
+        fields = (
+            "id", "prize", "prize_id", 
+            "amount_min_usd", "amount_max_usd", "weight",
+            "title", "amount_usd"  # Для обратной совместимости
+        )
+    
+    def get_title(self, obj):
+        return obj.prize.name if obj.prize else obj.title
+    
+    def get_amount_usd(self, obj):
+        return obj.amount_min_usd if obj.amount_min_usd else obj.amount_usd
 
 class CaseSerializer(serializers.ModelSerializer):
     type = CaseTypeSerializer(read_only=True)
@@ -55,9 +90,10 @@ class CaseDetailSerializer(CaseSerializer):
         fields = CaseSerializer.Meta.fields + ("prizes",)
 
 class SpinSerializer(serializers.ModelSerializer):
-    prize = CasePrizeSerializer(read_only=True)
-    prize_title = serializers.CharField(source="prize.title", read_only=True)
-    amount_usd  = serializers.DecimalField(source="prize.amount_usd", max_digits=14, decimal_places=2, read_only=True)
+    case_prize = CasePrizeSerializer(read_only=True)
+    prize = serializers.SerializerMethodField(read_only=True)  # Для обратной совместимости
+    prize_title = serializers.SerializerMethodField(read_only=True)
+    amount_usd = serializers.SerializerMethodField(read_only=True)  # Для обратной совместимости
 
     case_name = serializers.CharField(source="case.name", read_only=True)
     case_id = serializers.IntegerField(source="case.id", read_only=True)
@@ -66,7 +102,8 @@ class SpinSerializer(serializers.ModelSerializer):
         model = Spin
         fields = (
             "id", "created_at",
-            "case","case_id","case_name", "prize", "prize_title", "amount_usd",
+            "case", "case_id", "case_name", 
+            "case_prize", "prize", "prize_title", "amount_usd", "actual_amount_usd",
             # Provably Fair:
             "server_seed_hash",
             "server_seed",        # если не хочешь светить сразу — просто убери эту строку
@@ -77,14 +114,54 @@ class SpinSerializer(serializers.ModelSerializer):
             "weights_snapshot",
         )
         read_only_fields = fields
+    
+    def get_prize(self, obj):
+        """Для обратной совместимости"""
+        if obj.case_prize:
+            return CasePrizeSerializer(obj.case_prize, context=self.context).data
+        elif obj.prize:
+            return CasePrizeSerializer(obj.prize, context=self.context).data
+        return None
+    
+    def get_prize_title(self, obj):
+        """Для обратной совместимости"""
+        if obj.case_prize and obj.case_prize.prize:
+            return obj.case_prize.prize.name
+        elif obj.prize:
+            return obj.prize.prize_name
+        return None
+    
+    def get_amount_usd(self, obj):
+        """Для обратной совместимости"""
+        if obj.actual_amount_usd:
+            return obj.actual_amount_usd
+        elif obj.prize and obj.prize.amount_usd:
+            return obj.prize.amount_usd
+        return None
 
 class SpinListSerializer(serializers.ModelSerializer):
     case_id   = serializers.IntegerField(source="case.id", read_only=True)
     case_name = serializers.CharField(source="case.name", read_only=True)
-    prize_title = serializers.CharField(source="prize.title", read_only=True)
-    amount_usd  = serializers.DecimalField(source="prize.amount_usd", max_digits=14, decimal_places=2, read_only=True)
+    prize_title = serializers.SerializerMethodField(read_only=True)
+    amount_usd  = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Spin
         fields = ("id", "created_at", "case_id", "case_name", "prize_title", "amount_usd")
         read_only_fields = fields
+    
+    def get_prize_title(self, obj):
+        """Для обратной совместимости"""
+        if obj.case_prize and obj.case_prize.prize:
+            return obj.case_prize.prize.name
+        elif obj.prize:
+            return obj.prize.prize_name
+        return None
+    
+    def get_amount_usd(self, obj):
+        """Для обратной совместимости"""
+        if obj.actual_amount_usd:
+            return obj.actual_amount_usd
+        elif obj.prize and obj.prize.amount_usd:
+            return obj.prize.amount_usd
+        return None

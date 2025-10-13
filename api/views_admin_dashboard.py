@@ -130,7 +130,7 @@ class AdminDashboardView(APIView):
                 user__is_staff=False,
                 user__is_superuser=False
             ).annotate(
-                diff=F("case__price_usd") - F("prize__amount_usd")
+                diff=F("case__price_usd") - F("actual_amount_usd")
             ).filter(diff__gt=0).aggregate(total=Sum("diff"))["total"] or Decimal("0")
             
             # Реальный баланс
@@ -203,8 +203,8 @@ class AdminDashboardView(APIView):
 
         spins_count = spin_q.count()
 
-        wins_q = spin_q.annotate(diff=F("prize__amount_usd") - F("case__price_usd")).filter(diff__gt=0)
-        losses_q = spin_q.annotate(diff=F("case__price_usd") - F("prize__amount_usd")).filter(diff__gt=0)
+        wins_q = spin_q.annotate(diff=F("actual_amount_usd") - F("case__price_usd")).filter(diff__gt=0)
+        losses_q = spin_q.annotate(diff=F("case__price_usd") - F("actual_amount_usd")).filter(diff__gt=0)
 
         wins_sum   = wins_q.aggregate(s=Sum("diff"))["s"] or Decimal("0")
         losses_sum = losses_q.aggregate(s=Sum("diff"))["s"] or Decimal("0")
@@ -218,7 +218,7 @@ class AdminDashboardView(APIView):
         )["total"] or Decimal("0")
 
         case_wins_sum = case_spins.aggregate(
-           total=Sum("prize__amount_usd")
+           total=Sum("actual_amount_usd")
         )["total"] or Decimal("0")
 
         case_revenue = case_bets_sum - case_wins_sum
@@ -318,7 +318,7 @@ class AdminDashboardView(APIView):
             user__is_staff=False,
             user__is_superuser=False
         ).annotate(
-            diff=F("case__price_usd") - F("prize__amount_usd")
+            diff=F("case__price_usd") - F("actual_amount_usd")
         ).filter(diff__gt=0).aggregate(total=Sum("diff"))["total"] or Decimal("0")
 
         total_users_balance = total_deposits + total_ref_bonuses - total_withdrawals - total_losses
@@ -349,7 +349,7 @@ class AdminDashboardView(APIView):
 
         # ===== 5b) Топ пользователей по прибыли пользователя =====
         # user_profit = sum(prize.amount_usd - case.price_usd)
-        user_profit_expr = ExpressionWrapper(F("prize__amount_usd") - F("case__price_usd"),
+        user_profit_expr = ExpressionWrapper(F("actual_amount_usd") - F("case__price_usd"),
                                              output_field=DecimalField(max_digits=20, decimal_places=8))
         top_by_user_profit = (
             spin_q

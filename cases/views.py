@@ -7,10 +7,10 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from accounts.models import Profile
-from .models import CaseType, Case, CasePrize, Spin
+from .models import Prize, CaseType, Case, CasePrize, Spin
 from accounts.serializers import ProfileSerializer
 from .serializers import (
-    CaseTypeSerializer, CaseSerializer, CaseDetailSerializer,
+    PrizeSerializer, CaseTypeSerializer, CaseSerializer, CaseDetailSerializer,
     CasePrizeSerializer, SpinSerializer, SpinListSerializer
 )
 from .pf_utils import (
@@ -93,18 +93,29 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
 
             # Снимок весов на момент спина
             weights_snapshot = [
-                {"prize_id": p.id, "weight": int(max(1, p.weight or 1)), "amount_usd": str(p.amount_usd)}
+                {
+                    "case_prize_id": p.id, 
+                    "prize_id": p.id,  # Для обратной совместимости
+                    "weight": int(max(1, p.weight or 1)), 
+                    "amount_min_usd": str(p.amount_min_usd),
+                    "amount_max_usd": str(p.amount_max_usd),
+                    "amount_usd": str(p.amount_min_usd),  # Для обратной совместимости (используем минимальную сумму)
+                    "prize_name": p.prize.name if p.prize else p.prize_name
+                }
                 for p in prizes
             ]
 
             # Детерминированный выбор приза
-            prize = pick_by_weights(r, [{"obj": p, "weight": p.weight} for p in prizes])
+            case_prize = pick_by_weights(r, [{"obj": p, "weight": p.weight} for p in prizes])
+            
+            # Генерируем случайную сумму в диапазоне
+            actual_amount = case_prize.get_random_amount()
 
-            # ====== Денежная логика (как у тебя) ======
+            # ====== Денежная логика ======
             prof.balance_usd -= price
-            prof.balance_usd += Decimal(prize.amount_usd)
+            prof.balance_usd += actual_amount
 
-            net = Decimal(prize.amount_usd) - price
+            net = actual_amount - price
             if net >= 0:
                 prof.won_total_usd  += net
             else:
@@ -119,8 +130,9 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             # ====== Сохраняем PF-артефакты в Spin ======
             spin = Spin.objects.create(
                 case=case,
-                prize=prize,
+                case_prize=case_prize,
                 user=request.user,
+                actual_amount_usd=actual_amount,
                 server_seed_hash=server_hash,
                 server_seed=server_seed,         # ты можешь НЕ отдавать его сразу во фронт — решай бизнес-правилом
                 client_seed=client_seed,
@@ -142,6 +154,7 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                     "nonce": nonce,
                     "rollDigest": digest_hex,
                     "rngValue": str(r),
+                    "amount_usd": str(actual_amount),  # Для обратной совместимости
                 },
             }
             return Response(data, status=status.HTTP_201_CREATED)
@@ -202,7 +215,9 @@ class SpinViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin , viewsets.Ge
         prizes_by_id = {p.id: p for p in spin.case.prizes.all()}
         items = []
         for item in (spin.weights_snapshot or []):
-            p = prizes_by_id.get(item["prize_id"])
+            # Поддерживаем как старый формат (prize_id), так и новый (case_prize_id)
+            prize_id = item.get("case_prize_id") or item.get("prize_id")
+            p = prizes_by_id.get(prize_id)
             if p:
                 items.append({"obj": p, "weight": int(item.get("weight", 1))})
         if not items:
@@ -210,13 +225,17 @@ class SpinViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin , viewsets.Ge
             items = [{"obj": p, "weight": p.weight} for p in spin.case.prizes.all()]
 
         recomputed_prize = pick_by_weights(rng, items)
+        
+        # Проверяем соответствие приза (поддерживаем старые и новые спины)
+        actual_prize_id = spin.case_prize_id if spin.case_prize_id else spin.prize_id
+        prize_matches = (recomputed_prize.id == actual_prize_id)
 
         return Response({
-            "ok": bool(ok_hash and digest_hex == spin.roll_digest and recomputed_prize.id == spin.prize_id),
+            "ok": bool(ok_hash and digest_hex == spin.roll_digest and prize_matches),
             "checks": {
                 "serverSeedHashMatches": ok_hash,
                 "rollDigestMatches": (digest_hex == spin.roll_digest),
-                "prizeMatches": (recomputed_prize.id == spin.prize_id),
+                "prizeMatches": prize_matches,
             },
             "recomputed": {
                 "serverSeedHash": calculated_hash,
@@ -228,6 +247,19 @@ class SpinViewSet(mixins.RetrieveModelMixin, mixins.ListModelMixin , viewsets.Ge
                 "serverSeedHash": spin.server_seed_hash,
                 "rollDigest": spin.roll_digest,
                 "rngValue": str(spin.rng_value),
-                "prize_id": spin.prize_id,
+                "prize_id": actual_prize_id,
             }
         })
+
+
+class PrizeViewSet(viewsets.ModelViewSet):
+    """ViewSet для управления призами"""
+    queryset = Prize.objects.all()
+    serializer_class = PrizeSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        # Для обычных пользователей показываем только активные призы
+        if not self.request.user.is_staff:
+            return Prize.objects.filter(is_active=True)
+        return Prize.objects.all()
