@@ -3,7 +3,7 @@ from .views import health
 from rest_framework.routers import DefaultRouter
 from .views_admin import AdminUserViewSet, AdminCaseViewSet, AdminCaseTypeViewSet, AdminReferralLevelViewSet, AdminCashbackSettingsViewSet
 
-from .views_admin_dashboard import AdminDashboardView
+from .views_admin_dashboard import AdminDashboardView, ReferralBonusesListView, DepositsListView, WithdrawalsListView
 
 router = DefaultRouter()
 router.register(r"users", AdminUserViewSet, basename="admin-users")
@@ -19,6 +19,9 @@ urlpatterns = [
     path("referrals/", include("referrals.urls")),
     path("support/", include("support.urls")),
     path("admin/dashboard/", AdminDashboardView.as_view(), name="admin-dashboard"),
+    path("admin/referral-bonuses/", ReferralBonusesListView.as_view(), name="admin-referral-bonuses"),
+    path("admin/deposits/", DepositsListView.as_view(), name="admin-deposits"),
+    path("admin/withdrawals/", WithdrawalsListView.as_view(), name="admin-withdrawals"),
     path("admin/", include((router.urls, "admin"), namespace="admin")),
     path("cashback/", include("cashback.urls")),
 ]

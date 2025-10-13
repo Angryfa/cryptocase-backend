@@ -2,6 +2,7 @@ from rest_framework import serializers
 from cases.models import Case, CasePrize, CaseType
 from referrals.models import ReferralLevelConfig
 from cashback.models import CashbackSettings
+from accounts.models import Deposit, Withdrawal
 import json
 
 class AdminCasePrizeInSerializer(serializers.Serializer):
@@ -144,3 +145,98 @@ class AdminCashbackSettingsSerializer(serializers.ModelSerializer):
         fields = ("id", "enabled", "percent", "period_minutes", "run_minute", "updated_at")
 
 
+# Сериализаторы для вложенных данных
+class DepositUserSerializer(serializers.Serializer):
+    """Информация о пользователе для депозита"""
+    id = serializers.IntegerField()
+    username = serializers.CharField()
+    email = serializers.EmailField()
+
+
+class DepositStatusSerializer(serializers.Serializer):
+    """Информация о статусе депозита"""
+    code = serializers.CharField()
+    name = serializers.CharField()
+
+
+class AdminDepositSerializer(serializers.ModelSerializer):
+    """Сериализатор для отображения депозитов в админке"""
+    user = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Deposit
+        fields = (
+            "id",
+            "user",
+            "amount_usd",
+            "method",
+            "details",
+            "status",
+            "created_at",
+            "processed_at",
+            "comment",
+        )
+    
+    def get_user(self, obj):
+        """Возвращает данные пользователя"""
+        return {
+            "id": obj.user.id,
+            "username": obj.user.username,
+            "email": obj.user.email,
+        }
+    
+    def get_status(self, obj):
+        """Возвращает данные статуса"""
+        return {
+            "code": obj.status.code,
+            "name": obj.status.name,
+        }
+
+# Сериализаторы для выводов
+class WithdrawalUserSerializer(serializers.Serializer):
+    """Информация о пользователе для вывода"""
+    id = serializers.IntegerField()
+    username = serializers.CharField()
+    email = serializers.EmailField()
+
+
+class WithdrawalStatusSerializer(serializers.Serializer):
+    """Информация о статусе вывода"""
+    code = serializers.CharField()
+    name = serializers.CharField()
+
+
+class AdminWithdrawalSerializer(serializers.ModelSerializer):
+    """Сериализатор для отображения выводов в админке"""
+    user = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Withdrawal
+        fields = (
+            "id",
+            "user",
+            "amount_usd",
+            "method",
+            "details",
+            "status",
+            "created_at",
+            "processed_at",
+            "comment",
+        )
+    
+    def get_user(self, obj):
+        """Возвращает данные пользователя"""
+        return {
+            "id": obj.user.id,
+            "username": obj.user.username,
+            "email": obj.user.email,
+        }
+    
+    def get_status(self, obj):
+        """Возвращает данные статуса"""
+        return {
+            "code": obj.status.code,
+            "name": obj.status.name,
+        }

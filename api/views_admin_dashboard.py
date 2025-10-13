@@ -11,7 +11,7 @@ from rest_framework.response import Response
 from rest_framework import permissions, status
 
 from cases.models import Case, CaseType, CasePrize, Spin
-from referrals.models import ReferralProfile
+from referrals.models import ReferralProfile, ReferralBonus
 from accounts.models import Profile  # если нужно
 # Если у тебя Withdrawal/Deposit лежат в другом приложении — поправь импорт:
 from accounts.models import Withdrawal, Deposit  # у тебя такие модели есть в админке
@@ -80,25 +80,95 @@ class AdminDashboardView(APIView):
     
     def get(self, request):
         def get_balance_history(days):
-         """Возвращает историю общего баланса пользователей за указанное количество дней"""
-         
+         """
+         Возвращает историю РЕАЛЬНОГО баланса пользователей.
+         Реальный баланс = сумма одобренных депозитов - сумма одобренных выводов на каждую дату.
+         """
          history = []
-         end_date = timezone.now().date()
+         end_date = timezone.now()
          start_date = end_date - timedelta(days=days-1)
          
+         # Статусы завершенных операций
+         approved_codes = ("approved", "done", "completed", "paid", "success")
+         
          for i in range(days):
-            date = start_date + timedelta(days=i)
-            # Получаем срез баланса на конец каждого дня
-            # Это упрощенная версия - в реальности нужна история транзакций
-            total = Profile.objects.filter(
+            # Конец дня для среза данных
+            date_end = timezone.make_aware(
+                  datetime.combine(
+                     (start_date + timedelta(days=i)).date(),
+                     datetime.max.time()
+                  )
+            )
+            
+            # Сумма всех одобренных депозитов до этой даты (не от staff/superuser)
+            deposits_total = Deposit.objects.filter(
+                  status__code__in=approved_codes,
+                  processed_at__lte=date_end,
                   user__is_staff=False,
-                  user__is_superuser=False,
-                  created_at__lte=date
-            ).aggregate(total=Sum("balance_usd"))["total"] or Decimal("0")
+                  user__is_superuser=False
+            ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
+            
+            # Сумма всех одобренных выводов до этой даты (не от staff/superuser)
+            withdrawals_total = Withdrawal.objects.filter(
+                  status__code__in=approved_codes,
+                  processed_at__lte=date_end,
+                  user__is_staff=False,
+                  user__is_superuser=False
+            ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
+            
+            # Реальный баланс = депозиты - выводы
+            real_balance = deposits_total - withdrawals_total
             
             history.append({
-                  "date": date.isoformat(),
-                  "balance": float(total)
+                  "date": (start_date + timedelta(days=i)).date().isoformat(),
+                  "balance": float(real_balance)
+            })
+         
+         return history
+        
+        def get_revenue_history(days):
+         """
+         Возвращает историю дохода платформы.
+         Доход = сумма одобренных депозитов - сумма одобренных выводов на каждую дату.
+         """
+         history = []
+         end_date = timezone.now()
+         start_date = end_date - timedelta(days=days-1)
+         
+         approved_codes = ("approved", "done", "completed", "paid", "success")
+         
+         for i in range(days):
+            date_end = timezone.make_aware(
+                  datetime.combine(
+                     (start_date + timedelta(days=i)).date(),
+                     datetime.max.time()
+                  )
+            )
+            
+            # Депозиты за этот день
+            deposits_day = Deposit.objects.filter(
+                  status__code__in=approved_codes,
+                  processed_at__lte=date_end,
+                  processed_at__gt=date_end - timedelta(days=1),
+                  user__is_staff=False,
+                  user__is_superuser=False
+            ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
+            
+            # Выводы за этот день
+            withdrawals_day = Withdrawal.objects.filter(
+                  status__code__in=approved_codes,
+                  processed_at__lte=date_end,
+                  processed_at__gt=date_end - timedelta(days=1),
+                  user__is_staff=False,
+                  user__is_superuser=False
+            ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
+            
+            # Доход за день
+            revenue = deposits_day - withdrawals_day
+            
+            history.append({
+                  "date": (start_date + timedelta(days=i)).date().isoformat(),
+                  "revenue": float(revenue)
             })
          
          return history
@@ -203,10 +273,29 @@ class AdminDashboardView(APIView):
         new_ref_users_count = ReferralProfile.objects.filter(
             referred_at__gte=dt_from, referred_at__lte=dt_to
         ).count()
-        total_users_balance = Profile.objects.filter(
-            user__is_staff=False,
-            user__is_superuser=False
-         ).aggregate(total=Sum("balance_usd"))["total"] or Decimal("0")
+
+        # Реальный общий баланс пользователей (депозиты - выводы)
+        approved_codes = ("approved", "done", "completed", "paid", "success")
+  
+        total_deposits = Deposit.objects.filter(
+           status__code__in=approved_codes,
+           user__is_staff=False,
+           user__is_superuser=False
+        ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
+  
+        total_withdrawals = Withdrawal.objects.filter(
+           status__code__in=approved_codes,
+           user__is_staff=False,
+           user__is_superuser=False
+        ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
+
+        total_users_balance = total_deposits - total_withdrawals
+        # ===== Реферальные отчисления за последние 24 часа =====
+        now = timezone.now()  # используем timezone.now() из django.utils.timezone (уже импортирован на строке 8)
+        ref_bonus_24h = ReferralBonus.objects.filter(
+            created_at__gte=now - timedelta(hours=24),
+            created_at__lte=now
+        ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
 
         # ===== 5a) Топ пользователей по прокруткам =====
         top_by_spins = (
@@ -261,7 +350,7 @@ class AdminDashboardView(APIView):
 
         deposits_sum_done = dep_q_completed.aggregate(s=Sum("amount_usd"))["s"] or Decimal("0")
         withdrawals_sum_done = wdr_q_completed.aggregate(s=Sum("amount_usd"))["s"] or Decimal("0")
-
+         # что возвращает бэк фронту
         data = {
             "period": {
                 "from": dt_from.isoformat(),
@@ -285,6 +374,7 @@ class AdminDashboardView(APIView):
                     "sum_completed_usd": float(withdrawals_sum_done),
                 },
                 "total_users_balance_usd": float(total_users_balance),
+                "referral_bonuses_24h_usd": float(ref_bonus_24h),
             },
             "spins_by_type": spins_by_type,
             "top_users": {
@@ -296,6 +386,223 @@ class AdminDashboardView(APIView):
                "30d": get_balance_history(30),
                "365d": get_balance_history(365),
             },
+            "revenue_history": {
+               "7d": get_revenue_history(7),
+               "30d": get_revenue_history(30),
+               "365d": get_revenue_history(365),
+            },
             "game_revenue": game_revenue,
         }
         return Response(data, status=status.HTTP_200_OK)
+
+
+class ReferralBonusesListView(APIView):
+    """
+    Список всех реферальных отчислений с фильтрацией и пагинацией.
+    GET /api/admin/referral-bonuses/
+    
+    Query params:
+      - preset: today|yesterday|7d|30d|this_month|prev_month
+      - from: ISO8601 datetime
+      - to: ISO8601 datetime
+      - email: фильтр по email реферера или реферала
+      - page: номер страницы (default 1)
+      - page_size: размер страницы (default 50)
+    """
+    permission_classes = [IsAdmin]
+    
+    def get(self, request):
+        # Парсим период (используем существующую функцию _parse_period)
+        dt_from, dt_to = _parse_period(request)
+        
+        # Базовый queryset
+        qs = ReferralBonus.objects.filter(
+            created_at__gte=dt_from,
+            created_at__lte=dt_to
+        ).select_related(
+            'referrer', 'referral', 'deposit', 'deposit__status'
+        ).order_by('-created_at')
+        
+        # Фильтр по email (опционально)
+        email = request.query_params.get('email', '').strip()
+        if email:
+            qs = qs.filter(
+                Q(referrer__email__icontains=email) | 
+                Q(referral__email__icontains=email)
+            )
+        
+        # Общая сумма за период
+        total_sum = qs.aggregate(total=Sum('amount_usd'))['total'] or Decimal('0')
+        
+        # Пагинация
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 50))
+        start = (page - 1) * page_size
+        end = start + page_size
+        
+        total_count = qs.count()
+        items = qs[start:end]
+        
+        # Формируем результат
+        data = {
+            'period': {
+                'from': dt_from.isoformat(),
+                'to': dt_to.isoformat(),
+            },
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total_count': total_count,
+                'total_pages': (total_count + page_size - 1) // page_size,
+            },
+            'total_sum_usd': float(total_sum),
+            'items': [
+                {
+                    'id': item.id,
+                    'created_at': item.created_at.isoformat(),
+                    'referrer': {
+                        'id': item.referrer.id,
+                        'email': item.referrer.email,
+                        'username': item.referrer.username,
+                    },
+                    'referral': {
+                        'id': item.referral.id,
+                        'email': item.referral.email,
+                        'username': item.referral.username,
+                    },
+                    'deposit': {
+                        'id': item.deposit.id,
+                        'amount_usd': float(item.deposit.amount_usd),
+                        'status': item.deposit.status.name if item.deposit.status else '—',
+                    },
+                    'level': item.level,
+                    'percent': float(item.percent),
+                    'amount_usd': float(item.amount_usd),
+                }
+                for item in items
+            ]
+        }
+        
+        return Response(data, status=status.HTTP_200_OK)
+
+
+
+class DepositsListView(APIView):
+    """
+    Эндпоинт для получения списка депозитов с фильтрацией по периодам.
+    GET /api/admin/deposits/?preset=7d&page=1&page_size=50
+    """
+    permission_classes = [IsAdmin]
+    
+    def get(self, request):
+        # Парсим период используя существующую функцию
+        dt_from, dt_to = _parse_period(request)
+        
+        # Параметры пагинации
+        try:
+            page = int(request.query_params.get("page", 1))
+            if page < 1:
+                page = 1
+        except (TypeError, ValueError):
+            page = 1
+        
+        try:
+            page_size = int(request.query_params.get("page_size", 50))
+            if page_size < 1:
+                page_size = 50
+            if page_size > 100:
+                page_size = 100
+        except (TypeError, ValueError):
+            page_size = 50
+        
+        # Фильтруем депозиты по периоду
+        # Исключаем депозиты от администраторов
+        deposits_qs = Deposit.objects.filter(
+            created_at__gte=dt_from,
+            created_at__lte=dt_to,
+            user__is_staff=False,
+            user__is_superuser=False,
+        ).select_related("user", "status").order_by("-created_at")
+        
+        # Общее количество депозитов
+        total = deposits_qs.count()
+        
+        # Пагинация
+        start = (page - 1) * page_size
+        end = start + page_size
+        deposits_page = deposits_qs[start:end]
+        
+        # Сериализация
+        from api.serializers_admin import AdminDepositSerializer
+        serializer = AdminDepositSerializer(deposits_page, many=True)
+        
+        return Response({
+            "period": {
+                "from": dt_from.isoformat(),
+                "to": dt_to.isoformat(),
+            },
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "deposits": serializer.data,
+        })
+
+class WithdrawalsListView(APIView):
+    """
+    Эндпоинт для получения списка выводов с фильтрацией по периодам.
+    GET /api/admin/withdrawals/?preset=7d&page=1&page_size=50
+    """
+    permission_classes = [IsAdmin]
+    
+    def get(self, request):
+        # Парсим период используя существующую функцию
+        dt_from, dt_to = _parse_period(request)
+        
+        # Параметры пагинации
+        try:
+            page = int(request.query_params.get("page", 1))
+            if page < 1:
+                page = 1
+        except (TypeError, ValueError):
+            page = 1
+        
+        try:
+            page_size = int(request.query_params.get("page_size", 50))
+            if page_size < 1:
+                page_size = 50
+            if page_size > 100:
+                page_size = 100
+        except (TypeError, ValueError):
+            page_size = 50
+        
+        # Фильтруем выводы по периоду
+        # Исключаем выводы от администраторов
+        withdrawals_qs = Withdrawal.objects.filter(
+            created_at__gte=dt_from,
+            created_at__lte=dt_to,
+            user__is_staff=False,
+            user__is_superuser=False,
+        ).select_related("user", "status").order_by("-created_at")
+        
+        # Общее количество выводов
+        total = withdrawals_qs.count()
+        
+        # Пагинация
+        start = (page - 1) * page_size
+        end = start + page_size
+        withdrawals_page = withdrawals_qs[start:end]
+        
+        # Сериализация
+        from api.serializers_admin import AdminWithdrawalSerializer
+        serializer = AdminWithdrawalSerializer(withdrawals_page, many=True)
+        
+        return Response({
+            "period": {
+                "from": dt_from.isoformat(),
+                "to": dt_to.isoformat(),
+            },
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "withdrawals": serializer.data,
+        })
