@@ -93,3 +93,54 @@ class Deposit(models.Model):
 
     def __str__(self):
         return f"Deposit<{self.id}> {self.user} ${self.amount_usd} [{self.status}]"
+
+
+class WithdrawalBlock(models.Model):
+    """Модель для блокировок вывода средств"""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="withdrawal_blocks")
+    reason = models.TextField(blank=True, help_text="Причина блокировки")
+    blocked_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="withdrawal_blocks_created")
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(default=True, help_text="Активна ли блокировка")
+    
+    class Meta:
+        verbose_name = "Блокировка вывода"
+        verbose_name_plural = "Блокировки выводов"
+        ordering = ("-created_at",)
+    
+    def __str__(self):
+        return f"WithdrawalBlock<{self.id}> {self.user}"
+
+
+class DepositBlock(models.Model):
+    """Модель для блокировок ввода средств"""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="deposit_blocks")
+    reason = models.TextField(blank=True, help_text="Причина блокировки")
+    blocked_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="deposit_blocks_created")
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(default=True, help_text="Активна ли блокировка")
+    
+    class Meta:
+        verbose_name = "Блокировка ввода"
+        verbose_name_plural = "Блокировки вводов"
+        ordering = ("-created_at",)
+    
+    def __str__(self):
+        return f"DepositBlock<{self.id}> {self.user}"
+
+
+class AccountBlock(models.Model):
+    """Модель для блокировок аккаунта"""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="account_blocks")
+    reason = models.TextField(blank=True, help_text="Причина блокировки")
+    blocked_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="account_blocks_created")
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(default=True, help_text="Активна ли блокировка")
+    
+    class Meta:
+        verbose_name = "Блокировка аккаунта"
+        verbose_name_plural = "Блокировки аккаунтов"
+        ordering = ("-created_at",)
+    
+    def __str__(self):
+        return f"AccountBlock<{self.id}> {self.user}"

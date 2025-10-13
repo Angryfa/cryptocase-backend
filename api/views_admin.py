@@ -1,10 +1,13 @@
 from django.contrib.auth import get_user_model
+from django.db import models
 from rest_framework import viewsets, permissions, status, filters
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.decorators import action
 
 
-from accounts.serializers import UserWithProfileSerializer
+from accounts.serializers import UserWithProfileSerializer, AdminUserEditSerializer
+from accounts.models import Deposit, Withdrawal, DepositStatus, WithdrawalStatus, WithdrawalBlock, DepositBlock, AccountBlock
 from cases.models import Case, CaseType, Spin
 from cases.serializers import CaseDetailSerializer
 from referrals.models import ReferralLevelConfig, ReferralProfile
@@ -14,6 +17,12 @@ from .serializers_admin import (
     AdminCaseTypeSerializer,
     AdminReferralLevelSerializer,
     AdminCashbackSettingsSerializer,
+    WithdrawalBlockSerializer,
+    DepositBlockSerializer,
+    AccountBlockSerializer,
+    WithdrawalBlockCreateSerializer,
+    DepositBlockCreateSerializer,
+    AccountBlockCreateSerializer,
 )
 
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
@@ -27,12 +36,16 @@ class IsAdmin(permissions.IsAdminUser):
 User = get_user_model()
 
 
-class AdminUserViewSet(viewsets.ReadOnlyModelViewSet):
+class AdminUserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all().select_related("profile").order_by("id")
-    serializer_class = UserWithProfileSerializer
     permission_classes = [IsAdmin]
     filter_backends = [filters.SearchFilter]
     search_fields = ['id', 'email']
+    
+    def get_serializer_class(self):
+        if self.action in ['update', 'partial_update']:
+            return AdminUserEditSerializer
+        return UserWithProfileSerializer
 
     @action(detail=True, methods=["get"], url_path="details")
     def details(self, request, pk=None):
@@ -64,11 +77,11 @@ class AdminUserViewSet(viewsets.ReadOnlyModelViewSet):
                 items.append(item)
             return items
 
-        # spins history
+        # spins history (первые 20 записей для предварительного просмотра)
         spins_qs = (
             Spin.objects.filter(user=user)
             .select_related("case", "prize")
-            .order_by("-created_at")
+            .order_by("-created_at")[:20]
         )
         spins = [
             {
@@ -80,6 +93,76 @@ class AdminUserViewSet(viewsets.ReadOnlyModelViewSet):
             for sp in spins_qs
         ]
 
+        # deposits history
+        deposits_qs = (
+            Deposit.objects.filter(user=user)
+            .select_related("status")
+            .order_by("-created_at")
+        )
+        deposits = [
+            {
+                "id": dep.id,
+                "amount_usd": float(dep.amount_usd),
+                "method": dep.method,
+                "details": dep.details,
+                "status": {"code": dep.status.code, "name": dep.status.name},
+                "created_at": dep.created_at,
+                "processed_at": dep.processed_at,
+                "comment": dep.comment,
+            }
+            for dep in deposits_qs
+        ]
+
+        # withdrawals history
+        withdrawals_qs = (
+            Withdrawal.objects.filter(user=user)
+            .select_related("status")
+            .order_by("-created_at")
+        )
+        withdrawals = [
+            {
+                "id": wd.id,
+                "amount_usd": float(wd.amount_usd),
+                "method": wd.method,
+                "details": wd.details,
+                "status": {"code": wd.status.code, "name": wd.status.name},
+                "created_at": wd.created_at,
+                "processed_at": wd.processed_at,
+                "comment": wd.comment,
+            }
+            for wd in withdrawals_qs
+        ]
+
+        # Подсчет подтвержденных депозитов и выводов
+        approved_deposit_status = DepositStatus.objects.filter(code="approved").first()
+        approved_withdrawal_status = WithdrawalStatus.objects.filter(code="approved").first()
+        
+        approved_deposits_total = 0.0
+        approved_withdrawals_total = 0.0
+        
+        if approved_deposit_status:
+            approved_deposits_total = float(
+                Deposit.objects.filter(user=user, status=approved_deposit_status)
+                .aggregate(total=models.Sum('amount_usd'))['total'] or 0.0
+            )
+            
+        if approved_withdrawal_status:
+            approved_withdrawals_total = float(
+                Withdrawal.objects.filter(user=user, status=approved_withdrawal_status)
+                .aggregate(total=models.Sum('amount_usd'))['total'] or 0.0
+            )
+
+        # Получение активных блокировок пользователя
+        withdrawal_blocks = WithdrawalBlock.objects.filter(user=user, is_active=True)
+        deposit_blocks = DepositBlock.objects.filter(user=user, is_active=True)
+        account_blocks = AccountBlock.objects.filter(user=user, is_active=True)
+        
+        blocks_data = {
+            "withdrawal": WithdrawalBlockSerializer(withdrawal_blocks, many=True).data,
+            "deposit": DepositBlockSerializer(deposit_blocks, many=True).data,
+            "account": AccountBlockSerializer(account_blocks, many=True).data,
+        }
+
         return Response({
             "user": self.get_serializer(user).data,
             "referrals": {
@@ -89,7 +172,132 @@ class AdminUserViewSet(viewsets.ReadOnlyModelViewSet):
                 "level2": ser_ref(l2, include_referrer=True, percent=level2_percent),
             },
             "spins": spins,
+            "deposits": deposits,
+            "withdrawals": withdrawals,
+            "approved_deposits_total": approved_deposits_total,
+            "approved_withdrawals_total": approved_withdrawals_total,
+            "blocks": blocks_data,
         })
+
+    @action(detail=True, methods=["get"], url_path="spins")
+    def spins_history(self, request, pk=None):
+        """Отдельный endpoint для получения истории круток с пагинацией"""
+        user = self.get_object()
+        
+        # Параметры пагинации
+        page = int(request.GET.get('page', 1))
+        page_size = int(request.GET.get('page_size', 20))
+        
+        # Запрос круток
+        spins_qs = (
+            Spin.objects.filter(user=user)
+            .select_related("case", "prize")
+            .order_by("-created_at")
+        )
+        
+        total_spins = spins_qs.count()
+        start = (page - 1) * page_size
+        end = start + page_size
+        
+        spins_page = spins_qs[start:end]
+        spins = [
+            {
+                "id": sp.id,
+                "created_at": sp.created_at,
+                "case": {"id": sp.case_id, "name": sp.case.name},
+                "prize": {"id": sp.prize_id, "title": sp.prize.title, "amount_usd": sp.prize.amount_usd},
+            }
+            for sp in spins_page
+        ]
+        
+        pagination = {
+            "page": page,
+            "page_size": page_size,
+            "total": total_spins,
+            "total_pages": (total_spins + page_size - 1) // page_size,
+            "has_next": end < total_spins,
+            "has_previous": page > 1
+        }
+
+        return Response({
+            "spins": spins,
+            "pagination": pagination,
+        })
+
+    @action(detail=True, methods=["post"], url_path="blocks/withdrawal")
+    def create_withdrawal_block(self, request, pk=None):
+        """Создать блокировку вывода для пользователя"""
+        user = self.get_object()
+        data = request.data.copy()
+        data['user'] = user.id
+        
+        serializer = WithdrawalBlockCreateSerializer(data=data, context={'request': request})
+        if serializer.is_valid():
+            block = serializer.save()
+            return Response(WithdrawalBlockSerializer(block).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=["post"], url_path="blocks/deposit")
+    def create_deposit_block(self, request, pk=None):
+        """Создать блокировку ввода для пользователя"""
+        user = self.get_object()
+        data = request.data.copy()
+        data['user'] = user.id
+        
+        serializer = DepositBlockCreateSerializer(data=data, context={'request': request})
+        if serializer.is_valid():
+            block = serializer.save()
+            return Response(DepositBlockSerializer(block).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=["post"], url_path="blocks/account")
+    def create_account_block(self, request, pk=None):
+        """Создать блокировку аккаунта для пользователя"""
+        user = self.get_object()
+        data = request.data.copy()
+        data['user'] = user.id
+        
+        serializer = AccountBlockCreateSerializer(data=data, context={'request': request})
+        if serializer.is_valid():
+            block = serializer.save()
+            return Response(AccountBlockSerializer(block).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=["delete"], url_path="blocks/withdrawal/(?P<block_id>[^/.]+)")
+    def remove_withdrawal_block(self, request, pk=None, block_id=None):
+        """Удалить блокировку вывода пользователя"""
+        user = self.get_object()
+        try:
+            block = WithdrawalBlock.objects.get(id=block_id, user=user, is_active=True)
+            block.is_active = False
+            block.save()
+            return Response({"detail": "Блокировка вывода успешно удалена"}, status=status.HTTP_200_OK)
+        except WithdrawalBlock.DoesNotExist:
+            return Response({"detail": "Блокировка вывода не найдена"}, status=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=True, methods=["delete"], url_path="blocks/deposit/(?P<block_id>[^/.]+)")
+    def remove_deposit_block(self, request, pk=None, block_id=None):
+        """Удалить блокировку ввода пользователя"""
+        user = self.get_object()
+        try:
+            block = DepositBlock.objects.get(id=block_id, user=user, is_active=True)
+            block.is_active = False
+            block.save()
+            return Response({"detail": "Блокировка ввода успешно удалена"}, status=status.HTTP_200_OK)
+        except DepositBlock.DoesNotExist:
+            return Response({"detail": "Блокировка ввода не найдена"}, status=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=True, methods=["delete"], url_path="blocks/account/(?P<block_id>[^/.]+)")
+    def remove_account_block(self, request, pk=None, block_id=None):
+        """Удалить блокировку аккаунта пользователя"""
+        user = self.get_object()
+        try:
+            block = AccountBlock.objects.get(id=block_id, user=user, is_active=True)
+            block.is_active = False
+            block.save()
+            return Response({"detail": "Блокировка аккаунта успешно удалена"}, status=status.HTTP_200_OK)
+        except AccountBlock.DoesNotExist:
+            return Response({"detail": "Блокировка аккаунта не найдена"}, status=status.HTTP_404_NOT_FOUND)
 
 
 class AdminCaseViewSet(viewsets.ModelViewSet):
@@ -155,3 +363,4 @@ class AdminCashbackSettingsViewSet(viewsets.ModelViewSet):
         if not res.get("ok"):
             return Response({"detail": res.get("error")}, status=status.HTTP_400_BAD_REQUEST)
         return Response(res, status=status.HTTP_200_OK)
+

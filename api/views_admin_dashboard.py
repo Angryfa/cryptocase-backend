@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Tuple
 
 from django.contrib.auth import get_user_model
-from django.db.models import Sum, Count, F, DecimalField, ExpressionWrapper, Q
+from django.db.models import Sum, Count, F, DecimalField, ExpressionWrapper, Q, Case, When
 from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -81,8 +81,8 @@ class AdminDashboardView(APIView):
     def get(self, request):
         def get_balance_history(days):
          """
-         Возвращает историю РЕАЛЬНОГО баланса пользователей.
-         Реальный баланс = сумма одобренных депозитов - сумма одобренных выводов на каждую дату.
+         Возвращает историю общего баланса пользователей.
+         Общий баланс = подтвержденные депозиты + реф бонусы - подтвержденные выводы - проигрыши по кейсам на каждую дату.
          """
          history = []
          end_date = timezone.now()
@@ -115,9 +115,26 @@ class AdminDashboardView(APIView):
                   user__is_staff=False,
                   user__is_superuser=False
             ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
+
+            # Сумма всех реферальных бонусов до этой даты (не от staff/superuser)
+            ref_bonuses_total = ReferralBonus.objects.filter(
+                created_at__lte=date_end,
+                referrer__is_staff=False,
+                referrer__is_superuser=False
+            ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
             
-            # Реальный баланс = депозиты - выводы
-            real_balance = deposits_total - withdrawals_total
+            # Сумма всех проигрышей по кейсам до этой даты (не от staff/superuser)
+            # Проигрыш = когда prize.amount_usd < case.price_usd, разница идет в минус
+            losses_total = Spin.objects.filter(
+                created_at__lte=date_end,
+                user__is_staff=False,
+                user__is_superuser=False
+            ).annotate(
+                diff=F("case__price_usd") - F("prize__amount_usd")
+            ).filter(diff__gt=0).aggregate(total=Sum("diff"))["total"] or Decimal("0")
+            
+            # Реальный баланс
+            real_balance = deposits_total + ref_bonuses_total - withdrawals_total - losses_total
             
             history.append({
                   "date": (start_date + timedelta(days=i)).date().isoformat(),
@@ -274,7 +291,7 @@ class AdminDashboardView(APIView):
             referred_at__gte=dt_from, referred_at__lte=dt_to
         ).count()
 
-        # Реальный общий баланс пользователей (депозиты - выводы)
+        # Общий баланс пользователей (депозиты + реф бонусы - выводы - проигрыши по кейсам)
         approved_codes = ("approved", "done", "completed", "paid", "success")
   
         total_deposits = Deposit.objects.filter(
@@ -289,7 +306,23 @@ class AdminDashboardView(APIView):
            user__is_superuser=False
         ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
 
-        total_users_balance = total_deposits - total_withdrawals
+        # Сумма всех реферальных бонусов (не от staff/superuser)
+        total_ref_bonuses = ReferralBonus.objects.filter(
+            referrer__is_staff=False,
+            referrer__is_superuser=False
+        ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
+        
+        # Сумма всех проигрышей по кейсам (не от staff/superuser)
+        # Проигрыш = когда prize.amount_usd < case.price_usd
+        total_losses = Spin.objects.filter(
+            user__is_staff=False,
+            user__is_superuser=False
+        ).annotate(
+            diff=F("case__price_usd") - F("prize__amount_usd")
+        ).filter(diff__gt=0).aggregate(total=Sum("diff"))["total"] or Decimal("0")
+
+        total_users_balance = total_deposits + total_ref_bonuses - total_withdrawals - total_losses
+        
         # ===== Реферальные отчисления за последние 24 часа =====
         now = timezone.now()  # используем timezone.now() из django.utils.timezone (уже импортирован на строке 8)
         ref_bonus_24h = ReferralBonus.objects.filter(

@@ -2,7 +2,7 @@ from rest_framework import serializers
 from cases.models import Case, CasePrize, CaseType
 from referrals.models import ReferralLevelConfig
 from cashback.models import CashbackSettings
-from accounts.models import Deposit, Withdrawal
+from accounts.models import Deposit, Withdrawal, WithdrawalBlock, DepositBlock, AccountBlock
 import json
 
 class AdminCasePrizeInSerializer(serializers.Serializer):
@@ -240,3 +240,139 @@ class AdminWithdrawalSerializer(serializers.ModelSerializer):
             "code": obj.status.code,
             "name": obj.status.name,
         }
+
+
+# Сериализаторы для блокировок пользователей
+class BaseBlockSerializer(serializers.ModelSerializer):
+    """Базовый сериализатор для блокировок"""
+    blocked_by = serializers.SerializerMethodField()
+    user = serializers.SerializerMethodField()
+    
+    def get_user(self, obj):
+        """Возвращает данные пользователя"""
+        return {
+            "id": obj.user.id,
+            "username": obj.user.username,
+            "email": obj.user.email,
+        }
+    
+    def get_blocked_by(self, obj):
+        """Возвращает данные администратора, который создал блокировку"""
+        if obj.blocked_by:
+            return {
+                "id": obj.blocked_by.id,
+                "username": obj.blocked_by.username,
+                "email": obj.blocked_by.email,
+            }
+        return None
+
+
+class WithdrawalBlockSerializer(BaseBlockSerializer):
+    """Сериализатор для блокировок вывода"""
+    
+    class Meta:
+        model = WithdrawalBlock
+        fields = (
+            "id",
+            "user",
+            "reason",
+            "blocked_by",
+            "created_at",
+            "is_active",
+        )
+        read_only_fields = ("id", "created_at", "blocked_by", "user")
+
+
+class DepositBlockSerializer(BaseBlockSerializer):
+    """Сериализатор для блокировок ввода"""
+    
+    class Meta:
+        model = DepositBlock
+        fields = (
+            "id",
+            "user",
+            "reason",
+            "blocked_by",
+            "created_at",
+            "is_active",
+        )
+        read_only_fields = ("id", "created_at", "blocked_by", "user")
+
+
+class AccountBlockSerializer(BaseBlockSerializer):
+    """Сериализатор для блокировок аккаунта"""
+    
+    class Meta:
+        model = AccountBlock
+        fields = (
+            "id",
+            "user",
+            "reason",
+            "blocked_by",
+            "created_at",
+            "is_active",
+        )
+        read_only_fields = ("id", "created_at", "blocked_by", "user")
+
+
+class WithdrawalBlockCreateSerializer(serializers.ModelSerializer):
+    """Сериализатор для создания блокировок вывода"""
+    
+    class Meta:
+        model = WithdrawalBlock
+        fields = ("user", "reason")
+    
+    def create(self, validated_data):
+        request = self.context.get('request')
+        if request and hasattr(request, 'user'):
+            validated_data['blocked_by'] = request.user
+        
+        # Деактивируем предыдущие блокировки вывода для этого пользователя
+        WithdrawalBlock.objects.filter(
+            user=validated_data['user'],
+            is_active=True
+        ).update(is_active=False)
+        
+        return super().create(validated_data)
+
+
+class DepositBlockCreateSerializer(serializers.ModelSerializer):
+    """Сериализатор для создания блокировок ввода"""
+    
+    class Meta:
+        model = DepositBlock
+        fields = ("user", "reason")
+    
+    def create(self, validated_data):
+        request = self.context.get('request')
+        if request and hasattr(request, 'user'):
+            validated_data['blocked_by'] = request.user
+        
+        # Деактивируем предыдущие блокировки ввода для этого пользователя
+        DepositBlock.objects.filter(
+            user=validated_data['user'],
+            is_active=True
+        ).update(is_active=False)
+        
+        return super().create(validated_data)
+
+
+class AccountBlockCreateSerializer(serializers.ModelSerializer):
+    """Сериализатор для создания блокировок аккаунта"""
+    
+    class Meta:
+        model = AccountBlock
+        fields = ("user", "reason")
+    
+    def create(self, validated_data):
+        request = self.context.get('request')
+        if request and hasattr(request, 'user'):
+            validated_data['blocked_by'] = request.user
+        
+        # Деактивируем предыдущие блокировки аккаунта для этого пользователя
+        AccountBlock.objects.filter(
+            user=validated_data['user'],
+            is_active=True
+        ).update(is_active=False)
+        
+        return super().create(validated_data)
