@@ -47,6 +47,8 @@ class TicketMessageSerializer(serializers.ModelSerializer):
 class TicketSerializer(serializers.ModelSerializer):
     user = serializers.SerializerMethodField(read_only=True)
     messages = TicketMessageSerializer(many=True, read_only=True)
+    unread_for_staff = serializers.SerializerMethodField(read_only=True)
+    unread_count_for_staff = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Ticket
@@ -60,11 +62,24 @@ class TicketSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "messages",
+            "unread_for_staff",
+            "unread_count_for_staff",
         )
         read_only_fields = ("status", "is_closed_by_user", "is_closed_by_staff", "created_at", "updated_at")
 
     def get_user(self, obj):
         return {"id": obj.user_id, "email": getattr(obj.user, "email", None), "username": getattr(obj.user, "username", None)}
+
+    def get_unread_for_staff(self, obj):
+        request = self.context.get("request")
+        if not request:
+            return False
+        # Непрочитанные для админа: сообщения от пользователя без read_by_staff_at
+        return obj.messages.filter(author_id=obj.user_id, read_by_staff_at__isnull=True).exists()
+
+    def get_unread_count_for_staff(self, obj):
+        # Кол-во непрочитанных сообщений от пользователя для админа
+        return obj.messages.filter(author_id=obj.user_id, read_by_staff_at__isnull=True).count()
 
 
 class TicketCreateSerializer(serializers.Serializer):

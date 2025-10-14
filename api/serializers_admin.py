@@ -3,6 +3,7 @@ from cases.models import Prize, Case, CasePrize, CaseType, Spin
 from referrals.models import ReferralLevelConfig
 from cashback.models import CashbackSettings
 from accounts.models import Deposit, Withdrawal, WithdrawalBlock, DepositBlock, AccountBlock
+from promocodes.models import Promocode, PromocodeActivation
 import json
 from django.db import transaction
 from decimal import Decimal, InvalidOperation
@@ -499,6 +500,67 @@ class WithdrawalBlockCreateSerializer(serializers.ModelSerializer):
         ).update(is_active=False)
         
         return super().create(validated_data)
+
+
+# =====================
+# Промокоды — админка
+# =====================
+
+class AdminPromocodeSerializer(serializers.ModelSerializer):
+    remaining_activations = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Promocode
+        fields = (
+            "id",
+            "code",
+            "promo_type",
+            "amount_usd",
+            "max_activations",
+            "is_active",
+            "starts_at",
+            "ends_at",
+            "remaining_activations",
+            "created_at",
+            "updated_at",
+        )
+
+
+class AdminPromocodeWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Promocode
+        fields = (
+            "code",
+            "promo_type",
+            "amount_usd",
+            "max_activations",
+            "is_active",
+            "starts_at",
+            "ends_at",
+        )
+
+
+class AdminPromocodeActivationSerializer(serializers.ModelSerializer):
+    promocode = serializers.SerializerMethodField()
+    user = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PromocodeActivation
+        fields = (
+            "id",
+            "promocode",
+            "user",
+            "amount_usd",
+            "created_at",
+        )
+
+    def get_promocode(self, obj):
+        p = obj.promocode
+        return {"id": p.id, "code": p.code}
+
+    def get_user(self, obj):
+        u = obj.user
+        return {"id": u.id, "email": getattr(u, "email", ""), "username": getattr(u, "username", "")}        
 
 
 class DepositBlockCreateSerializer(serializers.ModelSerializer):

@@ -23,11 +23,15 @@ from .serializers_admin import (
     WithdrawalBlockCreateSerializer,
     DepositBlockCreateSerializer,
     AccountBlockCreateSerializer,
+    AdminPromocodeSerializer,
+    AdminPromocodeWriteSerializer,
+    AdminPromocodeActivationSerializer,
 )
 
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 from cashback.services import run_cashback_snapshot
+from promocodes.models import Promocode, PromocodeActivation
 
 class IsAdmin(permissions.IsAdminUser):
     pass
@@ -371,4 +375,23 @@ class AdminCashbackSettingsViewSet(viewsets.ModelViewSet):
         if not res.get("ok"):
             return Response({"detail": res.get("error")}, status=status.HTTP_400_BAD_REQUEST)
         return Response(res, status=status.HTTP_200_OK)
+
+
+class AdminPromocodeViewSet(viewsets.ModelViewSet):
+    queryset = Promocode.objects.all().order_by("-created_at")
+    permission_classes = [IsAdmin]
+
+    def get_serializer_class(self):
+        if self.action in ("create", "update", "partial_update"):
+            return AdminPromocodeWriteSerializer
+        return AdminPromocodeSerializer
+
+
+class AdminPromocodeActivationViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = (
+        PromocodeActivation.objects.select_related("promocode", "user")
+        .order_by("-created_at", "-id")
+    )
+    serializer_class = AdminPromocodeActivationSerializer
+    permission_classes = [IsAdmin]
 

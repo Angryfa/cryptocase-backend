@@ -36,6 +36,7 @@ INSTALLED_APPS = [
     "support",
     "cashback",
     "cases.apps.CasesConfig",
+    "promocodes.apps.PromocodesConfig",
 ]
 
 MIDDLEWARE = [

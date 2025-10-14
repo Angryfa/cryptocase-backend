@@ -82,7 +82,7 @@ class AdminDashboardView(APIView):
         def get_balance_history(days):
          """
          Возвращает историю общего баланса пользователей.
-         Общий баланс = подтвержденные депозиты + реф бонусы - подтвержденные выводы - проигрыши по кейсам на каждую дату.
+         Общий баланс = подтвержденные депозиты + реф бонусы - подтвержденные выводы + (выигрыши - проигрыши) по кейсам на каждую дату.
          """
          history = []
          end_date = timezone.now()
@@ -124,7 +124,6 @@ class AdminDashboardView(APIView):
             ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
             
             # Сумма всех проигрышей по кейсам до этой даты (не от staff/superuser)
-            # Проигрыш = когда prize.amount_usd < case.price_usd, разница идет в минус
             losses_total = Spin.objects.filter(
                 created_at__lte=date_end,
                 user__is_staff=False,
@@ -132,9 +131,18 @@ class AdminDashboardView(APIView):
             ).annotate(
                 diff=F("case__price_usd") - F("actual_amount_usd")
             ).filter(diff__gt=0).aggregate(total=Sum("diff"))["total"] or Decimal("0")
-            
+
+            # Сумма всех выигрышей по кейсам до этой даты (не от staff/superuser)
+            wins_total = Spin.objects.filter(
+                created_at__lte=date_end,
+                user__is_staff=False,
+                user__is_superuser=False
+            ).annotate(
+                diff=F("actual_amount_usd") - F("case__price_usd")
+            ).filter(diff__gt=0).aggregate(total=Sum("diff"))["total"] or Decimal("0")
+
             # Реальный баланс
-            real_balance = deposits_total + ref_bonuses_total - withdrawals_total - losses_total
+            real_balance = deposits_total + ref_bonuses_total - withdrawals_total + wins_total - losses_total
             
             history.append({
                   "date": (start_date + timedelta(days=i)).date().isoformat(),
@@ -146,7 +154,8 @@ class AdminDashboardView(APIView):
         def get_revenue_history(days):
          """
          Возвращает историю дохода платформы.
-         Доход = сумма одобренных депозитов - сумма одобренных выводов на каждую дату.
+         Доход = проигрыши - выигрыши - реферальные бонусы за день.
+         (депозиты/выводы исключены из формулы)
          """
          history = []
          end_date = timezone.now()
@@ -162,26 +171,36 @@ class AdminDashboardView(APIView):
                   )
             )
             
-            # Депозиты за этот день
-            deposits_day = Deposit.objects.filter(
-                  status__code__in=approved_codes,
-                  processed_at__lte=date_end,
-                  processed_at__gt=date_end - timedelta(days=1),
+            # Проигрыши за день (ставка - выигрыш > 0)
+            losses_day = Spin.objects.filter(
+                  created_at__lte=date_end,
+                  created_at__gt=date_end - timedelta(days=1),
                   user__is_staff=False,
                   user__is_superuser=False
-            ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
-            
-            # Выводы за этот день
-            withdrawals_day = Withdrawal.objects.filter(
-                  status__code__in=approved_codes,
-                  processed_at__lte=date_end,
-                  processed_at__gt=date_end - timedelta(days=1),
+            ).annotate(
+                  diff=F("case__price_usd") - F("actual_amount_usd")
+            ).filter(diff__gt=0).aggregate(total=Sum("diff"))["total"] or Decimal("0")
+
+            # Выигрыши за день (выигрыш - ставка > 0)
+            wins_day = Spin.objects.filter(
+                  created_at__lte=date_end,
+                  created_at__gt=date_end - timedelta(days=1),
                   user__is_staff=False,
                   user__is_superuser=False
+            ).annotate(
+                  diff=F("actual_amount_usd") - F("case__price_usd")
+            ).filter(diff__gt=0).aggregate(total=Sum("diff"))["total"] or Decimal("0")
+
+            # Реферальные бонусы за день
+            ref_day = ReferralBonus.objects.filter(
+                  created_at__lte=date_end,
+                  created_at__gt=date_end - timedelta(days=1),
+                  referrer__is_staff=False,
+                  referrer__is_superuser=False
             ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
-            
-            # Доход за день
-            revenue = deposits_day - withdrawals_day
+
+            # Доход за день по новой формуле
+            revenue = (losses_day - wins_day) - ref_day
             
             history.append({
                   "date": (start_date + timedelta(days=i)).date().isoformat(),
@@ -209,7 +228,12 @@ class AdminDashboardView(APIView):
         wins_sum   = wins_q.aggregate(s=Sum("diff"))["s"] or Decimal("0")
         losses_sum = losses_q.aggregate(s=Sum("diff"))["s"] or Decimal("0")
 
-        profit_usd = deposits_sum + losses_sum - wins_sum
+        # Доход платформы за выбранный период по новой формуле:
+        # проигрыши - выигрыши - реферальные бонусы (без депозитов)
+        ref_period = ReferralBonus.objects.filter(
+            created_at__gte=dt_from, created_at__lte=dt_to
+        ).aggregate(s=Sum("amount_usd"))["s"] or Decimal("0")
+        profit_usd = losses_sum - wins_sum - ref_period
         # ===== Доход по играм =====
         # Case: используем существующие Spin записи
         case_spins = spin_q  # уже отфильтровано по периоду
@@ -291,37 +315,12 @@ class AdminDashboardView(APIView):
             referred_at__gte=dt_from, referred_at__lte=dt_to
         ).count()
 
-        # Общий баланс пользователей (депозиты + реф бонусы - выводы - проигрыши по кейсам)
-        approved_codes = ("approved", "done", "completed", "paid", "success")
-  
-        total_deposits = Deposit.objects.filter(
-           status__code__in=approved_codes,
-           user__is_staff=False,
-           user__is_superuser=False
-        ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
-  
-        total_withdrawals = Withdrawal.objects.filter(
-           status__code__in=approved_codes,
-           user__is_staff=False,
-           user__is_superuser=False
-        ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
-
-        # Сумма всех реферальных бонусов (не от staff/superuser)
-        total_ref_bonuses = ReferralBonus.objects.filter(
-            referrer__is_staff=False,
-            referrer__is_superuser=False
-        ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
-        
-        # Сумма всех проигрышей по кейсам (не от staff/superuser)
-        # Проигрыш = когда prize.amount_usd < case.price_usd
-        total_losses = Spin.objects.filter(
+        # Общий баланс пользователей — берём фактическую сумму балансов профилей,
+        # чтобы избежать рассинхрона расчётов
+        total_users_balance = Profile.objects.filter(
             user__is_staff=False,
             user__is_superuser=False
-        ).annotate(
-            diff=F("case__price_usd") - F("actual_amount_usd")
-        ).filter(diff__gt=0).aggregate(total=Sum("diff"))["total"] or Decimal("0")
-
-        total_users_balance = total_deposits + total_ref_bonuses - total_withdrawals - total_losses
+        ).aggregate(total=Sum("balance_usd"))["total"] or Decimal("0")
         
         # ===== Реферальные отчисления за последние 24 часа =====
         now = timezone.now()  # используем timezone.now() из django.utils.timezone (уже импортирован на строке 8)
