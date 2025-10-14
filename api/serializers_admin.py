@@ -1,9 +1,11 @@
 from rest_framework import serializers
-from cases.models import Prize, Case, CasePrize, CaseType
+from cases.models import Prize, Case, CasePrize, CaseType, Spin
 from referrals.models import ReferralLevelConfig
 from cashback.models import CashbackSettings
 from accounts.models import Deposit, Withdrawal, WithdrawalBlock, DepositBlock, AccountBlock
 import json
+from django.db import transaction
+from decimal import Decimal, InvalidOperation
 
 class AdminCasePrizeInSerializer(serializers.Serializer):
     prize_id = serializers.IntegerField()
@@ -13,13 +15,8 @@ class AdminCasePrizeInSerializer(serializers.Serializer):
 
 
 class AdminCaseWriteSerializer(serializers.ModelSerializer):
-    # тип кейса для записи
     type_id = serializers.PrimaryKeyRelatedField(source="type", queryset=CaseType.objects.all())
-
-    # НОВОЕ: файл-аватар (принимаем через multipart/form-data)
     avatar = serializers.ImageField(required=False, allow_null=True)
-
-    # НОВОЕ: призы (поддержка и обычного списка, и JSON-строки в multipart)
     prizes = serializers.JSONField(required=False, write_only=True)
 
     class Meta:
@@ -34,16 +31,13 @@ class AdminCaseWriteSerializer(serializers.ModelSerializer):
             "available_to",
             "spins_total",
             "spins_used",
-            "avatar",     # <— добавлено
-            "prizes",     # <— write-only вход
+            "avatar",
+            "prizes",
         )
         read_only_fields = ("spins_used",)
-    
+
+    # ---- Валидация входных призов: поддержка 2 форматов ----
     def validate_prizes(self, value):
-        """
-        Приходит либо уже распарсенный список, либо строка — JSONField сам распарсит.
-        Здесь аккуратно валидируем структуру без deepcopy файлов.
-        """
         if value in (None, ""):
             return []
 
@@ -54,99 +48,239 @@ class AdminCaseWriteSerializer(serializers.ModelSerializer):
         for i, p in enumerate(value):
             if not isinstance(p, dict):
                 raise serializers.ValidationError(f"prizes[{i}] должен быть объектом")
-            
-            prize_id = p.get("prize_id")
-            amount_min_usd = p.get("amount_min_usd")
-            amount_max_usd = p.get("amount_max_usd")
+
+            pid = p.get("id", None)              # id записи CasePrize (для UPSERT)
             weight = p.get("weight", 1)
 
-            if not isinstance(prize_id, int):
-                raise serializers.ValidationError(f"prizes[{i}].prize_id обязателен и должен быть числом")
-            
-            # Проверяем, что приз существует
-            try:
-                Prize.objects.get(id=prize_id, is_active=True)
-            except Prize.DoesNotExist:
-                raise serializers.ValidationError(f"prizes[{i}].prize_id: приз с ID {prize_id} не найден или неактивен")
-            
-            # Валидируем суммы
-            try:
-                amount_min_usd = float(amount_min_usd)
-                amount_max_usd = float(amount_max_usd)
-            except (TypeError, ValueError):
-                raise serializers.ValidationError(f"prizes[{i}].amount_min_usd и amount_max_usd должны быть числами")
-            
-            if amount_min_usd <= 0 or amount_max_usd <= 0:
-                raise serializers.ValidationError(f"prizes[{i}]: суммы должны быть больше 0")
-            
-            if amount_min_usd > amount_max_usd:
-                raise serializers.ValidationError(f"prizes[{i}]: amount_min_usd не может быть больше amount_max_usd")
-            
-            try:
-                weight = int(weight)
-            except (TypeError, ValueError):
-                raise serializers.ValidationError(f"prizes[{i}].weight должно быть целым числом")
-            if weight < 1:
-                raise serializers.ValidationError(f"prizes[{i}].weight должно быть >= 1")
+            # Канонический формат: prize_id + min/max
+            if "prize_id" in p or "amount_min_usd" in p or "amount_max_usd" in p:
+                prize_id = p.get("prize_id")
+                amt_min = p.get("amount_min_usd")
+                amt_max = p.get("amount_max_usd")
 
-            cleaned.append({
-                "prize_id": prize_id,
-                "amount_min_usd": amount_min_usd,
-                "amount_max_usd": amount_max_usd,
-                "weight": weight,
-            })
+                if not isinstance(prize_id, int):
+                    raise serializers.ValidationError(f"prizes[{i}].prize_id обязателен и должен быть числом")
+
+                try:
+                    Prize.objects.get(id=prize_id, is_active=True)
+                except Prize.DoesNotExist:
+                    raise serializers.ValidationError(f"prizes[{i}].prize_id: приз {prize_id} не найден или неактивен")
+
+                try:
+                    amt_min = Decimal(str(amt_min))
+                    amt_max = Decimal(str(amt_max))
+                except (InvalidOperation, TypeError, ValueError):
+                    raise serializers.ValidationError(f"prizes[{i}].amount_min_usd и amount_max_usd должны быть числами")
+
+                if amt_min <= 0 or amt_max <= 0:
+                    raise serializers.ValidationError(f"prizes[{i}]: суммы должны быть > 0")
+                if amt_min > amt_max:
+                    raise serializers.ValidationError(f"prizes[{i}]: amount_min_usd не может быть больше amount_max_usd")
+
+                try:
+                    weight = int(weight)
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError(f"prizes[{i}].weight должно быть целым числом")
+                if weight < 1:
+                    raise serializers.ValidationError(f"prizes[{i}].weight должно быть >= 1")
+
+                item = {
+                    "schema": "fk",
+                    "prize_id": prize_id,
+                    "amount_min_usd": amt_min,
+                    "amount_max_usd": amt_max,
+                    "weight": weight,
+                }
+
+            # Устаревший формат: title + amount_usd
+            elif "title" in p or "amount_usd" in p:
+                title = p.get("title")
+                amount_usd = p.get("amount_usd")
+
+                if not isinstance(title, str) or not title.strip():
+                    raise serializers.ValidationError(f"prizes[{i}].title обязателен")
+
+                try:
+                    amount_usd = Decimal(str(amount_usd))
+                except (InvalidOperation, TypeError, ValueError):
+                    raise serializers.ValidationError(f"prizes[{i}].amount_usd должно быть числом")
+
+                if amount_usd <= 0:
+                    raise serializers.ValidationError(f"prizes[{i}].amount_usd должно быть > 0")
+
+                try:
+                    weight = int(weight)
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError(f"prizes[{i}].weight должно быть целым числом")
+                if weight < 1:
+                    raise serializers.ValidationError(f"prizes[{i}].weight должно быть >= 1")
+
+                # Сохраняем в устаревшие поля, диапазон ставим min=max=amount_usd
+                item = {
+                    "schema": "legacy",
+                    "title": title.strip(),
+                    "amount_usd": amount_usd,
+                    "amount_min_usd": amount_usd,
+                    "amount_max_usd": amount_usd,
+                    "weight": weight,
+                    "prize_id": None,  # явное отсутствие FK
+                }
+
+            else:
+                raise serializers.ValidationError(
+                    f"prizes[{i}]: ожидаются поля либо (prize_id, amount_min_usd, amount_max_usd[, weight]), "
+                    f"либо (title, amount_usd[, weight])"
+                )
+
+            if pid not in (None, "", 0):
+                try:
+                    item["id"] = int(pid)
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError(f"prizes[{i}].id должен быть целым")
+
+            cleaned.append(item)
+
         return cleaned
-    
+
+    def _create_case_prizes(self, case, prizes_data):
+        """Вставка призов при create."""
+        to_create = []
+        for p in prizes_data:
+            if p["schema"] == "fk":
+                to_create.append(CasePrize(
+                    case=case,
+                    prize_id=p["prize_id"],
+                    amount_min_usd=p["amount_min_usd"],
+                    amount_max_usd=p["amount_max_usd"],
+                    weight=p["weight"],
+                    # чистим устаревшие поля
+                    title=None,
+                    amount_usd=None,
+                ))
+            else:  # legacy
+                to_create.append(CasePrize(
+                    case=case,
+                    prize=None,
+                    title=p["title"],
+                    amount_usd=p["amount_usd"],
+                    amount_min_usd=p["amount_min_usd"],
+                    amount_max_usd=p["amount_max_usd"],
+                    weight=p["weight"],
+                ))
+        if to_create:
+            CasePrize.objects.bulk_create(to_create)
+
+    def _upsert_case_prizes(self, case, prizes_data):
+        """
+        UPSERT по id: обновить существующие, создать новые; удалить отсутствующие,
+        если по ним нет Spin (учитываем и case_prize, и старую ссылку prize).
+        """
+        existing = {cp.id: cp for cp in case.prizes.all()}
+        seen_ids = set()
+
+        # 1) обновления/создания
+        for item in prizes_data or []:
+            rec_id = item.get("id")
+
+            if rec_id and rec_id in existing:
+                cp = existing[rec_id]
+                if item["schema"] == "fk":
+                    cp.prize_id = item["prize_id"]
+                    cp.title = None
+                    cp.amount_usd = None
+                    cp.amount_min_usd = item["amount_min_usd"]
+                    cp.amount_max_usd = item["amount_max_usd"]
+                    cp.weight = item["weight"]
+                else:
+                    cp.prize = None
+                    cp.title = item["title"]
+                    cp.amount_usd = item["amount_usd"]
+                    cp.amount_min_usd = item["amount_min_usd"]
+                    cp.amount_max_usd = item["amount_max_usd"]
+                    cp.weight = item["weight"]
+                cp.save()
+                seen_ids.add(rec_id)
+            else:
+                if item["schema"] == "fk":
+                    obj = CasePrize.objects.create(
+                        case=case,
+                        prize_id=item["prize_id"],
+                        amount_min_usd=item["amount_min_usd"],
+                        amount_max_usd=item["amount_max_usd"],
+                        weight=item["weight"],
+                        title=None,
+                        amount_usd=None,
+                    )
+                else:
+                    obj = CasePrize.objects.create(
+                        case=case,
+                        prize=None,
+                        title=item["title"],
+                        amount_usd=item["amount_usd"],
+                        amount_min_usd=item["amount_min_usd"],
+                        amount_max_usd=item["amount_max_usd"],
+                        weight=item["weight"],
+                    )
+                seen_ids.add(obj.id)
+
+        # 2) удаления безопасные
+        to_delete = [cp for cid, cp in existing.items() if cid not in seen_ids]
+        if to_delete:
+            deletable, blocked = [], []
+            for cp in to_delete:
+                has_spins = Spin.objects.filter(
+                    models.Q(case_prize=cp) | models.Q(prize=cp)
+                ).exists()
+                if has_spins:
+                    blocked.append(cp.id)
+                else:
+                    deletable.append(cp.id)
+
+            if deletable:
+                CasePrize.objects.filter(id__in=deletable).delete()
+
+            if blocked:
+                raise serializers.ValidationError({
+                    "prizes": (
+                        "Нельзя удалить некоторые призы, т.к. на них существуют крутки (Spin). "
+                        "Оставьте их в списке. Заблокированные ID: %(ids)s"
+                    ) % {"ids": blocked}
+                })
 
     def create(self, validated_data):
-        # РАНО вырезаем файл (до любых манипуляций с прочими данными)
         avatar = validated_data.pop("avatar", None)
         prizes_data = validated_data.pop("prizes", [])
+
         case = Case.objects.create(**validated_data)
         if avatar is not None:
             case.avatar = avatar
             case.save(update_fields=["avatar"])
+
         if prizes_data:
-            CasePrize.objects.bulk_create([
-                CasePrize(
-                    case=case, 
-                    prize_id=p["prize_id"],
-                    amount_min_usd=p["amount_min_usd"], 
-                    amount_max_usd=p["amount_max_usd"], 
-                    weight=p["weight"]
-                )
-                for p in prizes_data
-            ])
+            self._create_case_prizes(case, prizes_data)
+
         return case
 
+    @transaction.atomic
     def update(self, instance: Case, validated_data):
-        # РАНО вырезаем файл
         avatar = validated_data.pop("avatar", None)
+        prizes_present = "prizes" in validated_data
         prizes_data = validated_data.pop("prizes", None)
 
-        # обновляем поля кейса, включая avatar (если пришёл)
+        # обновляем поля кейса
         for field, value in validated_data.items():
             setattr(instance, field, value)
-         # Обновляем аватар (если прислали ключ avatar — даже если он None, можно трактовать как “очистить”)
+
         if avatar is not None:
             instance.avatar = avatar
 
         instance.save()
 
-        # политика упрощённая: полная замена призов при передаче prizes
-        if prizes_data is not None:
-            instance.prizes.all().delete()
-            if prizes_data:
-                CasePrize.objects.bulk_create([
-                    CasePrize(
-                        case=instance, 
-                        prize_id=p["prize_id"],
-                        amount_min_usd=p["amount_min_usd"], 
-                        amount_max_usd=p["amount_max_usd"], 
-                        weight=p["weight"]
-                    )
-                    for p in prizes_data
-                ])
+        if not prizes_present:
+            return instance
+
+        # UPSERT состава призов
+        self._upsert_case_prizes(instance, prizes_data or [])
         return instance
 
 

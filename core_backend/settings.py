@@ -32,10 +32,10 @@ INSTALLED_APPS = [
     "corsheaders",
     "accounts",
     "api",
-    "cases",
     "referrals",
     "support",
     "cashback",
+    "cases.apps.CasesConfig",
 ]
 
 MIDDLEWARE = [
