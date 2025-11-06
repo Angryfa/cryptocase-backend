@@ -539,6 +539,20 @@ class AdminPromocodeWriteSerializer(serializers.ModelSerializer):
             "ends_at",
         )
 
+    def validate_amount_usd(self, value):
+        if value is None:
+            return value
+        if value < 0:
+            raise serializers.ValidationError("Номинал не может быть отрицательным")
+        return value
+
+    def validate_max_activations(self, value):
+        if value is None:
+            return value
+        if value < 0:
+            raise serializers.ValidationError("Количество активаций не может быть отрицательным")
+        return value
+
 
 class AdminPromocodeActivationSerializer(serializers.ModelSerializer):
     promocode = serializers.SerializerMethodField()

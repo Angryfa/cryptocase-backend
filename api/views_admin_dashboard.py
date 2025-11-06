@@ -5,12 +5,13 @@ from typing import Tuple
 
 from django.contrib.auth import get_user_model
 from django.db.models import Sum, Count, F, DecimalField, ExpressionWrapper, Q, Case, When
+from django.db.models.functions import TruncDate, Coalesce
 from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import permissions, status
 
-from cases.models import Case, CaseType, CasePrize, Spin
+from cases.models import Case as CaseModel, CaseType, CasePrize, Spin
 from referrals.models import ReferralProfile, ReferralBonus
 from accounts.models import Profile  # если нужно
 # Если у тебя Withdrawal/Deposit лежат в другом приложении — поправь импорт:
@@ -79,134 +80,182 @@ class AdminDashboardView(APIView):
     permission_classes = [IsAdmin]
     
     def get(self, request):
+        
         def get_balance_history(days):
-         """
-         Возвращает историю общего баланса пользователей.
-         Общий баланс = подтвержденные депозиты + реф бонусы - подтвержденные выводы + (выигрыши - проигрыши) по кейсам на каждую дату.
-         """
-         history = []
-         end_date = timezone.now()
-         start_date = end_date - timedelta(days=days-1)
-         
-         # Статусы завершенных операций
-         approved_codes = ("approved", "done", "completed", "paid", "success")
-         
-         for i in range(days):
-            # Конец дня для среза данных
-            date_end = timezone.make_aware(
-                  datetime.combine(
-                     (start_date + timedelta(days=i)).date(),
-                     datetime.max.time()
-                  )
+            end_dt = timezone.now()
+            start_dt = end_dt - timedelta(days=days - 1)
+            start_d = start_dt.date()
+            end_d = end_dt.date()
+            day_list = [start_d + timedelta(days=i) for i in range(days)]
+
+            completed_codes = ("done", "approved", "completed", "paid", "success")
+
+            # --- Депозиты: группируем по дате на Python (event_dt = processed_at или created_at)
+            dep_q = (
+                Deposit.objects
+                .annotate(event_dt=Coalesce("processed_at", "created_at"))
+                .filter(event_dt__gte=start_dt, event_dt__lte=end_dt)
             )
-            
-            # Сумма всех одобренных депозитов до этой даты (не от staff/superuser)
-            deposits_total = Deposit.objects.filter(
-                  status__code__in=approved_codes,
-                  processed_at__lte=date_end,
-                  user__is_staff=False,
-                  user__is_superuser=False
-            ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
-            
-            # Сумма всех одобренных выводов до этой даты (не от staff/superuser)
-            withdrawals_total = Withdrawal.objects.filter(
-                  status__code__in=approved_codes,
-                  processed_at__lte=date_end,
-                  user__is_staff=False,
-                  user__is_superuser=False
-            ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
+            if hasattr(Deposit, "status"):
+                dep_q = dep_q.filter(Q(status__code__in=completed_codes) | Q(processed_at__isnull=False))
+            dep_rows_all = dep_q.values("event_dt", "amount_usd")
+            dep_by_day = {}
+            for r in dep_rows_all:
+                d = r["event_dt"].date()
+                dep_by_day[d] = (dep_by_day.get(d, Decimal("0")) + (r["amount_usd"] or Decimal("0")))
 
-            # Сумма всех реферальных бонусов до этой даты (не от staff/superuser)
-            ref_bonuses_total = ReferralBonus.objects.filter(
-                created_at__lte=date_end,
-                referrer__is_staff=False,
-                referrer__is_superuser=False
-            ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
-            
-            # Сумма всех проигрышей по кейсам до этой даты (не от staff/superuser)
-            losses_total = Spin.objects.filter(
-                created_at__lte=date_end,
-                user__is_staff=False,
-                user__is_superuser=False
-            ).annotate(
-                diff=F("case__price_usd") - F("actual_amount_usd")
-            ).filter(diff__gt=0).aggregate(total=Sum("diff"))["total"] or Decimal("0")
+            # --- Выводы: группируем по дате на Python
+            wdr_q = (
+                Withdrawal.objects
+                .annotate(event_dt=Coalesce("processed_at", "created_at"))
+                .filter(event_dt__gte=start_dt, event_dt__lte=end_dt)
+            )
+            if hasattr(Withdrawal, "status"):
+                wdr_q = wdr_q.filter(Q(status__code__in=completed_codes) | Q(processed_at__isnull=False))
+            wdr_rows_all = wdr_q.values("event_dt", "amount_usd")
+            wdr_by_day = {}
+            for r in wdr_rows_all:
+                d = r["event_dt"].date()
+                wdr_by_day[d] = (wdr_by_day.get(d, Decimal("0")) + (r["amount_usd"] or Decimal("0")))
 
-            # Сумма всех выигрышей по кейсам до этой даты (не от staff/superuser)
-            wins_total = Spin.objects.filter(
-                created_at__lte=date_end,
-                user__is_staff=False,
-                user__is_superuser=False
-            ).annotate(
-                diff=F("actual_amount_usd") - F("case__price_usd")
-            ).filter(diff__gt=0).aggregate(total=Sum("diff"))["total"] or Decimal("0")
+            # --- Реферальные бонусы (по created_at)
+            ref_rows_all = (
+                ReferralBonus.objects
+                .filter(created_at__gte=start_dt, created_at__lte=end_dt)
+                .values("created_at", "amount_usd")
+            )
+            ref_by_day = {}
+            for r in ref_rows_all:
+                d = r["created_at"].date()
+                ref_by_day[d] = (ref_by_day.get(d, Decimal("0")) + (r["amount_usd"] or Decimal("0")))
 
-            # Реальный баланс
-            real_balance = deposits_total + ref_bonuses_total - withdrawals_total + wins_total - losses_total
+            # --- Спины: выигрыши/проигрыши (по created_at)
+            spins_rows_all = (
+                Spin.objects
+                .filter(created_at__gte=start_dt, created_at__lte=end_dt)
+                .values("created_at", "actual_amount_usd", "case__price_usd")
+            )
+            wins_by_day, losses_by_day = {}, {}
+            for r in spins_rows_all:
+                d = r["created_at"].date()
+                actual = r["actual_amount_usd"] or Decimal("0")
+                price  = r["case__price_usd"] or Decimal("0")
+                if actual > price:
+                    wins_by_day[d] = (wins_by_day.get(d, Decimal("0")) + (actual - price))
+                elif price > actual:
+                    losses_by_day[d] = (losses_by_day.get(d, Decimal("0")) + (price - actual))
+
+            # --- Ежедневные дельты, которые меняют баланс профилей
+            delta_by_day = {}
+            for d in day_list:
+                dep = dep_by_day.get(d, Decimal("0"))
+                wdr = wdr_by_day.get(d, Decimal("0"))
+                ref = ref_by_day.get(d, Decimal("0"))
+                win = wins_by_day.get(d, Decimal("0"))
+                los = losses_by_day.get(d, Decimal("0"))
+                delta_by_day[d] = dep + ref + (win - los) - wdr
+
+            # --- Текущий фактический баланс (как KPI)
+            total_now = (
+                Profile.objects
+                .filter(user__is_staff=False, user__is_superuser=False)
+                .aggregate(total=Sum("balance_usd"))["total"] or Decimal("0")
+            )
+
+            # База на старт окна => гарантируем совпадение последней точки с KPI
+            sum_window_delta = sum(delta_by_day.values(), Decimal("0"))
+            base_at_start = total_now - sum_window_delta
+
+            # Кумулятив + диагностика по дням
+            history, running = [], base_at_start
+            for d in day_list:
+                dep = float(dep_by_day.get(d, Decimal("0")))
+                ref = float(ref_by_day.get(d, Decimal("0")))
+                win = float(wins_by_day.get(d, Decimal("0")))
+                los = float(losses_by_day.get(d, Decimal("0")))
+                wdr = float(wdr_by_day.get(d, Decimal("0")))
+                delta = float(delta_by_day[d])
+                running += Decimal(str(delta))
+                history.append({
+                    "date": d.isoformat(),
+                    "balance": float(running),
+                    "diag": {
+                        "deposit": dep,
+                        "referral": ref,
+                        "wins": win,
+                        "losses": los,
+                        "withdrawals": wdr,
+                        "delta": delta,
+                        "running": float(running),
+                        "base_at_start": float(base_at_start),
+                    }
+                })
+
             
-            history.append({
-                  "date": (start_date + timedelta(days=i)).date().isoformat(),
-                  "balance": float(real_balance)
-            })
-         
-         return history
+
+            # Диагностические ряды (из Python-бакетинга)
+            dep_rows = [{"date": d.isoformat(), "sum": float(v)} for d, v in sorted(dep_by_day.items())]
+            wdr_rows = [{"date": d.isoformat(), "sum": float(v)} for d, v in sorted(wdr_by_day.items())]
+            ref_rows = [{"date": d.isoformat(), "sum": float(v)} for d, v in sorted(ref_by_day.items())]
+            # для спинов создадим объединённый словарь ключей дат
+            spin_dates = set(list(wins_by_day.keys()) + list(losses_by_day.keys()))
+            spins_rows = [{
+                "date": d.isoformat(),
+                "wins": float(wins_by_day.get(d, Decimal("0"))),
+                "losses": float(losses_by_day.get(d, Decimal("0"))),
+            } for d in sorted(spin_dates)]
+
+            return history, {
+                "window": {"start": start_d.isoformat(), "end": end_d.isoformat()},
+                "deposits": dep_rows,
+                "withdrawals": wdr_rows,
+                "referrals": ref_rows,
+                "spins": spins_rows,
+            }
         
         def get_revenue_history(days):
          """
-         Возвращает историю дохода платформы.
-         Доход = проигрыши - выигрыши - реферальные бонусы за день.
-         (депозиты/выводы исключены из формулы)
+         История дохода: проигрыши - выигрыши - реф.бонусы за день.
+         Группируем по датам на Python, чтобы избежать пустых агрегатов.
          """
+         end_dt = timezone.now()
+         start_dt = end_dt - timedelta(days=days-1)
+         start_d = start_dt.date()
+         end_d = end_dt.date()
+         day_list = [start_d + timedelta(days=i) for i in range(days)]
+
+         # Реферальные бонусы
+         ref_rows_all = (
+            ReferralBonus.objects
+            .filter(created_at__gte=start_dt, created_at__lte=end_dt)
+            .values("created_at", "amount_usd")
+         )
+         ref_by_day = {}
+         for r in ref_rows_all:
+            d = r["created_at"].date()
+            ref_by_day[d] = (ref_by_day.get(d, Decimal("0")) + (r["amount_usd"] or Decimal("0")))
+
+         # Спины: wins/losses
+         spins_rows_all = (
+            Spin.objects
+            .filter(created_at__gte=start_dt, created_at__lte=end_dt)
+            .values("created_at", "actual_amount_usd", "case__price_usd")
+         )
+         wins_by_day, losses_by_day = {}, {}
+         for r in spins_rows_all:
+            d = r["created_at"].date()
+            actual = r["actual_amount_usd"] or Decimal("0")
+            price  = r["case__price_usd"] or Decimal("0")
+            if actual > price:
+               wins_by_day[d] = (wins_by_day.get(d, Decimal("0")) + (actual - price))
+            elif price > actual:
+               losses_by_day[d] = (losses_by_day.get(d, Decimal("0")) + (price - actual))
+
          history = []
-         end_date = timezone.now()
-         start_date = end_date - timedelta(days=days-1)
-         
-         approved_codes = ("approved", "done", "completed", "paid", "success")
-         
-         for i in range(days):
-            date_end = timezone.make_aware(
-                  datetime.combine(
-                     (start_date + timedelta(days=i)).date(),
-                     datetime.max.time()
-                  )
-            )
-            
-            # Проигрыши за день (ставка - выигрыш > 0)
-            losses_day = Spin.objects.filter(
-                  created_at__lte=date_end,
-                  created_at__gt=date_end - timedelta(days=1),
-                  user__is_staff=False,
-                  user__is_superuser=False
-            ).annotate(
-                  diff=F("case__price_usd") - F("actual_amount_usd")
-            ).filter(diff__gt=0).aggregate(total=Sum("diff"))["total"] or Decimal("0")
+         for d in day_list:
+            revenue = (losses_by_day.get(d, Decimal("0")) - wins_by_day.get(d, Decimal("0"))) - ref_by_day.get(d, Decimal("0"))
+            history.append({"date": d.isoformat(), "revenue": float(revenue)})
 
-            # Выигрыши за день (выигрыш - ставка > 0)
-            wins_day = Spin.objects.filter(
-                  created_at__lte=date_end,
-                  created_at__gt=date_end - timedelta(days=1),
-                  user__is_staff=False,
-                  user__is_superuser=False
-            ).annotate(
-                  diff=F("actual_amount_usd") - F("case__price_usd")
-            ).filter(diff__gt=0).aggregate(total=Sum("diff"))["total"] or Decimal("0")
-
-            # Реферальные бонусы за день
-            ref_day = ReferralBonus.objects.filter(
-                  created_at__lte=date_end,
-                  created_at__gt=date_end - timedelta(days=1),
-                  referrer__is_staff=False,
-                  referrer__is_superuser=False
-            ).aggregate(total=Sum("amount_usd"))["total"] or Decimal("0")
-
-            # Доход за день по новой формуле
-            revenue = (losses_day - wins_day) - ref_day
-            
-            history.append({
-                  "date": (start_date + timedelta(days=i)).date().isoformat(),
-                  "revenue": float(revenue)
-            })
-         
          return history
 
         dt_from, dt_to = _parse_period(request)
@@ -234,6 +283,12 @@ class AdminDashboardView(APIView):
             created_at__gte=dt_from, created_at__lte=dt_to
         ).aggregate(s=Sum("amount_usd"))["s"] or Decimal("0")
         profit_usd = losses_sum - wins_sum - ref_period
+
+        # KPI: общий доход (за всё время) по той же формуле
+        wins_total_all = Spin.objects.all().annotate(diff=F("actual_amount_usd") - F("case__price_usd")).filter(diff__gt=0).aggregate(s=Sum("diff"))["s"] or Decimal("0")
+        losses_total_all = Spin.objects.all().annotate(diff=F("case__price_usd") - F("actual_amount_usd")).filter(diff__gt=0).aggregate(s=Sum("diff"))["s"] or Decimal("0")
+        ref_total_all = ReferralBonus.objects.all().aggregate(s=Sum("amount_usd"))["s"] or Decimal("0")
+        total_profit_all_time = losses_total_all - wins_total_all - ref_total_all
         # ===== Доход по играм =====
         # Case: используем существующие Spin записи
         case_spins = spin_q  # уже отфильтровано по периоду
@@ -407,6 +462,7 @@ class AdminDashboardView(APIView):
                 },
                 "total_users_balance_usd": float(total_users_balance),
                 "referral_bonuses_24h_usd": float(ref_bonus_24h),
+                "total_profit_all_time_usd": float(total_profit_all_time),
             },
             "spins_by_type": spins_by_type,
             "top_users": {
@@ -414,9 +470,14 @@ class AdminDashboardView(APIView):
                 "by_user_profit": top_by_user_profit,
             },
             "balance_history": {
-               "7d": get_balance_history(7),
-               "30d": get_balance_history(30),
-               "365d": get_balance_history(365),
+               "7d": get_balance_history(7)[0],
+               "30d": get_balance_history(30)[0],
+               "365d": get_balance_history(365)[0],
+            },
+            "balance_history_debug": {
+               "7d": get_balance_history(7)[1],
+               "30d": get_balance_history(30)[1],
+               "365d": get_balance_history(365)[1],
             },
             "revenue_history": {
                "7d": get_revenue_history(7),
