@@ -1,5 +1,5 @@
 from django.contrib.auth import get_user_model
-from django.db import models
+from django.db import models, connection
 from rest_framework import viewsets, permissions, status, filters
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
@@ -82,9 +82,11 @@ class AdminUserViewSet(viewsets.ModelViewSet):
             return items
 
         # spins history (первые 20 записей для предварительного просмотра)
+        # Показываем все крутки (дополнительные открытия теперь в отдельной таблице BonusSpin)
         spins_qs = (
             Spin.objects.filter(user=user)
             .select_related("case", "prize", "case_prize", "case_prize__prize")
+            .prefetch_related("bonus_spin_records")
             .order_by("-created_at")[:20]
         )
         spins = [
@@ -94,7 +96,12 @@ class AdminUserViewSet(viewsets.ModelViewSet):
                 "case": {"id": sp.case_id, "name": sp.case.name},
                 "prize": {
                     "id": sp.case_prize_id or sp.prize_id, 
-                    "title": sp.case_prize.prize.name if sp.case_prize and sp.case_prize.prize else (sp.prize.title if sp.prize else "Неизвестный приз"), 
+                    "title": (
+                        (sp.case_prize.prize.name if sp.case_prize and sp.case_prize.prize else None) or
+                        (sp.case_prize.title if sp.case_prize and sp.case_prize.title else None) or
+                        (sp.prize.title if sp.prize else None) or
+                        "Неизвестный приз"
+                    ), 
                     "amount_usd": sp.actual_amount_usd or (sp.prize.amount_usd if sp.prize else 0)
                 },
             }
@@ -196,10 +203,11 @@ class AdminUserViewSet(viewsets.ModelViewSet):
         page = int(request.GET.get('page', 1))
         page_size = int(request.GET.get('page_size', 20))
         
-        # Запрос круток
+        # Запрос круток (показываем все, дополнительные открытия в отдельной таблице BonusSpin)
         spins_qs = (
             Spin.objects.filter(user=user)
             .select_related("case", "prize")
+            .prefetch_related("bonus_spin_records")
             .order_by("-created_at")
         )
         
@@ -215,7 +223,12 @@ class AdminUserViewSet(viewsets.ModelViewSet):
                 "case": {"id": sp.case_id, "name": sp.case.name},
                 "prize": {
                     "id": sp.case_prize_id or sp.prize_id, 
-                    "title": sp.case_prize.prize.name if sp.case_prize and sp.case_prize.prize else (sp.prize.title if sp.prize else "Неизвестный приз"), 
+                    "title": (
+                        (sp.case_prize.prize.name if sp.case_prize and sp.case_prize.prize else None) or
+                        (sp.case_prize.title if sp.case_prize and sp.case_prize.title else None) or
+                        (sp.prize.title if sp.prize else None) or
+                        "Неизвестный приз"
+                    ), 
                     "amount_usd": sp.actual_amount_usd or (sp.prize.amount_usd if sp.prize else 0)
                 },
             }

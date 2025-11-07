@@ -19,6 +19,38 @@ class AdminCaseWriteSerializer(serializers.ModelSerializer):
     type_id = serializers.PrimaryKeyRelatedField(source="type", queryset=CaseType.objects.all())
     avatar = serializers.ImageField(required=False, allow_null=True)
     prizes = serializers.JSONField(required=False, write_only=True)
+    
+    # Бонусная система - явная обработка для правильной работы с FormData
+    bonus_chance = serializers.DecimalField(max_digits=5, decimal_places=4, required=False, allow_null=True)
+    bonus_type_chance_multiplier = serializers.DecimalField(max_digits=5, decimal_places=4, required=False, allow_null=True)
+    bonus_multipliers = serializers.JSONField(required=False, allow_null=True)
+    max_bonus_opens = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    
+    def validate_bonus_chance(self, value):
+        """Валидация bonus_chance"""
+        if value is None or value == "":
+            return Decimal("0.0")
+        try:
+            if isinstance(value, str):
+                value = Decimal(value)
+            if value < 0 or value > 1:
+                raise serializers.ValidationError("bonus_chance должен быть в диапазоне от 0 до 1")
+            return value
+        except (InvalidOperation, ValueError, TypeError):
+            raise serializers.ValidationError("bonus_chance должен быть числом от 0 до 1")
+    
+    def validate_bonus_type_chance_multiplier(self, value):
+        """Валидация bonus_type_chance_multiplier"""
+        if value is None or value == "":
+            return Decimal("0.5")
+        try:
+            if isinstance(value, str):
+                value = Decimal(value)
+            if value < 0 or value > 1:
+                raise serializers.ValidationError("bonus_type_chance_multiplier должен быть в диапазоне от 0 до 1")
+            return value
+        except (InvalidOperation, ValueError, TypeError):
+            raise serializers.ValidationError("bonus_type_chance_multiplier должен быть числом от 0 до 1")
 
     class Meta:
         model = Case
@@ -34,8 +66,51 @@ class AdminCaseWriteSerializer(serializers.ModelSerializer):
             "spins_used",
             "avatar",
             "prizes",
+            # Бонусная система:
+            "bonus_chance",
+            "bonus_type_chance_multiplier",
+            "bonus_multipliers",
+            "max_bonus_opens",
         )
         read_only_fields = ("spins_used",)
+    
+    def validate_bonus_multipliers(self, value):
+        """Валидация и преобразование bonus_multipliers"""
+        if value is None or value == "":
+            return []
+        
+        # Если пришла строка (из FormData), парсим JSON
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                raise serializers.ValidationError("bonus_multipliers должен быть валидным JSON")
+        
+        if not isinstance(value, list):
+            raise serializers.ValidationError("bonus_multipliers должен быть массивом")
+        
+        # Валидируем каждый элемент
+        for i, item in enumerate(value):
+            if not isinstance(item, dict):
+                raise serializers.ValidationError(f"bonus_multipliers[{i}] должен быть объектом")
+            if "multiplier" not in item:
+                raise serializers.ValidationError(f"bonus_multipliers[{i}] должен содержать поле 'multiplier'")
+            try:
+                multiplier = int(item["multiplier"])
+                if multiplier < 1:
+                    raise serializers.ValidationError(f"bonus_multipliers[{i}].multiplier должен быть >= 1")
+            except (ValueError, TypeError):
+                raise serializers.ValidationError(f"bonus_multipliers[{i}].multiplier должен быть целым числом")
+            
+            weight = item.get("weight", 1)
+            try:
+                weight = int(weight)
+                if weight < 1:
+                    raise serializers.ValidationError(f"bonus_multipliers[{i}].weight должен быть >= 1")
+            except (ValueError, TypeError):
+                raise serializers.ValidationError(f"bonus_multipliers[{i}].weight должен быть целым числом")
+        
+        return value
 
     # ---- Валидация входных призов: поддержка 2 форматов ----
     def validate_prizes(self, value):
@@ -268,14 +343,21 @@ class AdminCaseWriteSerializer(serializers.ModelSerializer):
         prizes_present = "prizes" in validated_data
         prizes_data = validated_data.pop("prizes", None)
 
-        # обновляем поля кейса
+        # обновляем поля кейса (включая бонусные поля)
+        update_fields = []
         for field, value in validated_data.items():
             setattr(instance, field, value)
+            update_fields.append(field)
 
         if avatar is not None:
             instance.avatar = avatar
+            update_fields.append("avatar")
 
-        instance.save()
+        # Сохраняем с указанием полей для обновления
+        if update_fields:
+            instance.save(update_fields=update_fields)
+        else:
+            instance.save()
 
         if not prizes_present:
             return instance

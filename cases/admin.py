@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Prize, CaseType, Case, CasePrize, Spin
+from .models import Prize, CaseType, Case, CasePrize, Spin, BonusSpin
 from django.utils.html import format_html
 
 @admin.register(Prize)
@@ -82,4 +82,21 @@ class SpinAdmin(admin.ModelAdmin):
         elif obj.prize and obj.prize.amount_usd:
             return f"${obj.prize.amount_usd}"
         return "—"
+    amount_display.short_description = "Сумма выигрыша"
+
+@admin.register(BonusSpin)
+class BonusSpinAdmin(admin.ModelAdmin):
+    list_display = ("id", "parent_spin", "case", "prize_name", "amount_display", "created_at")
+    list_filter = ("case", "created_at", "parent_spin")
+    search_fields = ("case__name", "case_prize__prize__name", "parent_spin__id")
+    readonly_fields = ("created_at",)
+    
+    def prize_name(self, obj):
+        if obj.case_prize and obj.case_prize.prize:
+            return obj.case_prize.prize.name
+        return "Неизвестный приз"
+    prize_name.short_description = "Приз"
+    
+    def amount_display(self, obj):
+        return f"${obj.actual_amount_usd}"
     amount_display.short_description = "Сумма выигрыша"

@@ -2,6 +2,7 @@ from django.db import models
 from django.db.models import Q, F, JSONField 
 from django.utils import timezone
 from django.conf import settings
+from decimal import Decimal
 import os
 import uuid
 
@@ -94,6 +95,34 @@ class Case(models.Model):
         verbose_name="Аватар кейса",
     )
 
+    # Бонусная система
+    bonus_chance = models.DecimalField(
+        max_digits=5, 
+        decimal_places=4, 
+        default=Decimal("0.0"),
+        verbose_name="Шанс выпадения бонуса (0-1)",
+        help_text="Вероятность выпадения бонуса после открытия кейса"
+    )
+    bonus_type_chance_multiplier = models.DecimalField(
+        max_digits=5,
+        decimal_places=4,
+        default=Decimal("0.5"),
+        verbose_name="Шанс множителя vs доп. открытия (0-1)",
+        help_text="Если бонус выпал, вероятность что это будет множитель (иначе - доп. открытие)"
+    )
+    bonus_multipliers = JSONField(
+        null=True,
+        blank=True,
+        default=list,
+        verbose_name="Множители бонуса",
+        help_text='Список множителей с весами: [{"multiplier": 2, "weight": 10}, {"multiplier": 3, "weight": 5}]'
+    )
+    max_bonus_opens = models.PositiveIntegerField(
+        default=1,
+        verbose_name="Максимум доп. открытий",
+        help_text="Максимальное количество дополнительных открытий за один спин"
+    )
+
     objects = CaseQuerySet.as_manager()
 
     def __str__(self):
@@ -176,6 +205,40 @@ class Spin(models.Model):
 
     # Фактическая сумма выигрыша (случайная в диапазоне)
     actual_amount_usd = models.DecimalField(max_digits=14, decimal_places=2, default=0.01, verbose_name="Фактическая сумма выигрыша")
+    
+    # Бонусная система
+    has_bonus = models.BooleanField(default=False, verbose_name="Есть бонус")
+    BONUS_TYPE_CHOICES = [
+        ('multiplier', 'Множитель'),
+        ('extra_open', 'Дополнительное открытие'),
+    ]
+    bonus_type = models.CharField(
+        max_length=20,
+        choices=BONUS_TYPE_CHOICES,
+        null=True,
+        blank=True,
+        verbose_name="Тип бонуса"
+    )
+    bonus_multiplier = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name="Множитель бонуса",
+        help_text="Множитель выигрыша (x2, x3 и т.д.)"
+    )
+    base_amount_usd = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name="Начальная сумма выигрыша",
+        help_text="Сумма выигрыша до применения бонуса"
+    )
+    bonus_spins = JSONField(
+        null=True,
+        blank=True,
+        verbose_name="Дополнительные спины",
+        help_text='Массив дополнительных спинов: [{"spin_id": ..., "amount": ..., "bonus_type": ...}]'
+    )
 
     # NEW: PF-коммит/раскрытие
     server_seed_hash = models.CharField(max_length=64, db_index=True, null=True, blank=True)
@@ -204,3 +267,47 @@ class Spin(models.Model):
         elif self.prize:
             return self.prize
         return None
+
+
+class BonusSpin(models.Model):
+    """Дополнительное открытие кейса (бонус)"""
+    parent_spin = models.ForeignKey(
+        Spin,
+        on_delete=models.CASCADE,
+        related_name='bonus_spin_records',
+        verbose_name="Основной спин",
+        help_text="Основной спин, к которому относится это дополнительное открытие"
+    )
+    case = models.ForeignKey(Case, on_delete=models.CASCADE, verbose_name="Кейс")
+    case_prize = models.ForeignKey(CasePrize, on_delete=models.PROTECT, verbose_name="Приз кейса", null=True, blank=True)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.CASCADE, verbose_name="Пользователь")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Дата создания")
+    
+    # Сумма выигрыша
+    actual_amount_usd = models.DecimalField(
+        max_digits=14, 
+        decimal_places=2, 
+        default=0.01, 
+        verbose_name="Сумма выигрыша"
+    )
+    
+    # Provably Fair данные
+    server_seed_hash = models.CharField(max_length=64, db_index=True, null=True, blank=True, verbose_name="Server Seed Hash")
+    server_seed = models.TextField(null=True, blank=True, verbose_name="Server Seed")
+    client_seed = models.CharField(max_length=64, null=True, blank=True, verbose_name="Client Seed")
+    nonce = models.PositiveIntegerField(default=0, null=True, blank=True, verbose_name="Nonce")
+    roll_digest = models.CharField(max_length=64, null=True, blank=True, verbose_name="Roll Digest")
+    rng_value = models.DecimalField(max_digits=20, decimal_places=18, null=True, blank=True, verbose_name="RNG Value")
+    weights_snapshot = JSONField(null=True, blank=True, verbose_name="Снимок весов")
+
+    class Meta:
+        verbose_name = "Дополнительное открытие"
+        verbose_name_plural = "Дополнительные открытия"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['parent_spin', '-created_at']),
+            models.Index(fields=['user', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"BonusSpin #{self.id} — к Spin #{self.parent_spin_id}: ${self.actual_amount_usd}"
